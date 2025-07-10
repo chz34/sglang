@@ -1534,6 +1534,43 @@ def load_model_with_cpu_quantization(
     return model.eval()
 
 
+from sglang.srt.models.ms_model.radix_qwen2 import RadixModel
+
+type_model_map = {
+    "qwen2": RadixModel,
+
+}
+
+class MindSporeModelLoader(DefaultModelLoader):
+    """Model loader that will load a mindspore object as model."""
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if load_config.model_loader_extra_config:
+            raise ValueError(
+                f"Model loader extra config is not supported for "
+                f"load format {load_config.load_format}"
+            )
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        pass  # Nothing to download
+
+    def load_model(
+        self,
+        *,
+        model_config: ModelConfig,
+        device_config: DeviceConfig,
+    ) -> nn.Module:
+        model_name = model_config.hf_config.model_type
+        if model_name not in type_model_map:
+            raise ValueError(f"Unsupported arch {arch}")
+        
+        arch = type_model_map[model_name]
+        model = arch(model_config, self.load_config)
+        model.torchao_applied = True
+        model.load_weights([])
+        return model
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -1557,5 +1594,9 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.REMOTE:
         return RemoteModelLoader(load_config)
+    
+    if load_config.load_format == LoadFormat.MINDSPORE:
+        return MindSporeModelLoader(load_config)
+
 
     return DefaultModelLoader(load_config)
