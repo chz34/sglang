@@ -204,7 +204,7 @@ class RadixModel(nn.Module):
         model_inputs, is_prefill = self.prepare_inputs(input_ids, positions, forward_batch)
 
         self.time_start = time.time()
-        logger.info("ms run interval: ", self.time_start - self.time_end)
+        logger.info(f"ms run interval: {self.time_start - self.time_end}")
         if is_prefill:
             self.network.phase = "prefill"
             self.network.add_flags_custom(is_first_iteration=True)
@@ -231,5 +231,5 @@ class RadixModel(nn.Module):
         self.time_end = time.time()
         print("ms run time: ", self.time_end - self.time_start)
 
-        logits_result = LogitsProcessorOutput(next_token_logits=torch.Tensor(logits.asnumpy()).to("cpu"))
+        logits_result = LogitsProcessorOutput(next_token_logits=torch.Tensor(logits.asnumpy()).to(input_ids.device))
         return logits_result
