@@ -7,9 +7,10 @@ os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_7b_in
 
 def main():
     llm = sgl.Engine(model_path="/home/ckpt/qwen2.5-7b-hf",
-                     device="cpu",
+                     device="npu",
                      load_format="mindspore",
                      max_total_tokens=20000,
+                     attention_backend="torch_native",
                      disable_overlap_schedule=True,
                      tp_size=1,
                      dp_size=1)

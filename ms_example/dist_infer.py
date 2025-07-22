@@ -1,12 +1,6 @@
 import os
 
-from PIL import Image
-import requests
-import sglang_mindspore
 import sglang as sgl
-
-from sglang.srt.conversation import chat_templates
-from sglang.utils import async_stream_and_merge, stream_and_merge
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14,9 +8,10 @@ os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_32b_i
 
 def main():
     llm = sgl.Engine(model_path="/home/ckpt/Qwen2.5-32B-Instruct",
-                     device="cpu",
+                     device="npu",
                      load_format="mindspore",
                      max_total_tokens=20000,
+                     attention_backend="torch_native",
                      disable_overlap_schedule=True,
                      tp_size=4,
                      dp_size=1)
