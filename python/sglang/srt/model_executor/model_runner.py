@@ -138,6 +138,71 @@ UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
 logger = logging.getLogger(__name__)
 
 
+import subprocess
+import sys
+from pathlib import Path
+
+class _Tmp:
+    def __init__(self):
+        self.sched_p = None
+
+    def set_sched_process(self, p):
+        self.sched_p = p
+
+    def __del__(self):
+        if self.sched_p:
+            self.sched_p.kill()
+
+
+_tmp = _Tmp()
+
+
+def _get_host_and_ip(distributed_init_method):
+    try:
+        _, ip_str, port_str = distributed_init_method.split(":")
+        ip = ip_str.split("/")[-1]
+        port = int(port_str)
+    except Exception as e:
+        raise RuntimeError(
+            "Cannot get host and port information from %s, error: %s!"
+            % (distributed_init_method, str(e))
+        )
+
+    return ip, port
+
+def set_ms_parallel_env(rank, world_size, init_method):
+    if not os.getenv("MS_ROLE"):
+        # Not call from msrun, should call a subprocess for scheduler.
+        if rank == 0:
+            with open(str(Path() / "schedule.log"), "w") as scheduler_f:
+                script = Path(__file__).parent / "scheduler_init.py"
+                sched_p = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(script),
+                        "--rank_id",
+                        str(rank),
+                        "--rank_size",
+                        str(world_size),
+                        "--distributed_init_method",
+                        str(init_method),
+                    ],
+                    shell=False,
+                    stdout=scheduler_f,
+                    stderr=subprocess.STDOUT,
+                )
+                global _tmp
+                _tmp.set_sched_process(sched_p)
+
+        os.environ["MS_WORKER_NUM"] = str(world_size)
+        os.environ["MS_ROLE"] = "MS_WORKER"
+        os.environ["MS_NODE_ID"] = str(rank)
+        comm_addr, comm_port = _get_host_and_ip(init_method)
+        os.environ["MS_SCHED_HOST"] = str(comm_addr)
+        os.environ["MS_SCHED_PORT"] = str(comm_port)
+        os.environ["DEVICE_ID"] = str(rank)
+
+
 class RankZeroFilter(logging.Filter):
     """Filter that only allows INFO level logs from rank 0, but allows all other levels from any rank."""
 
@@ -228,6 +293,8 @@ class ModelRunner:
         if self.device == "cpu":
             self.init_threads_binding()
 
+        self.init_ms_parallel_env()
+
         # Get memory before model loading
         min_per_gpu_memory = self.init_torch_distributed()
 
@@ -245,6 +312,16 @@ class ModelRunner:
 
         # For weight updates
         self._model_update_group = {}
+
+    def init_ms_parallel_env(self):
+
+        world_size = self.tp_size * self.pp_size
+        rank = self.tp_size * self.pp_rank + self.tp_rank
+        if self.server_args.dist_init_addr:
+            dist_init_method = f"tcp://{self.server_args.dist_init_addr}"
+        else:
+            dist_init_method = f"tcp://{self.server_args.host}:{self.dist_port + 33}"
+        set_ms_parallel_env(rank, world_size, dist_init_method)
 
     def initialize(self, min_per_gpu_memory: float):
         server_args = self.server_args

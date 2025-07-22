@@ -175,21 +175,19 @@ class MsAttnBackend(nn.Cell):
         query = mint.reshape(query, (-1, 1, self.n_heads, self.head_dim))
         query = mint.transpose(query, 1, 2)
 
-        bs = batch_valid_length.shape[0]
-
-        req_key = key_cache[token_cache_loc]
-        req_value = value_cache[token_cache_loc]
+        key = ops.gather(key_cache, token_cache_loc, 0)
+        value = ops.gather(value_cache, token_cache_loc, 0)
 
         # k: B,S,N,D -> B,N,D,S
-        req_key = mint.transpose(req_key, 1, 2)
+        key = mint.transpose(key, 1, 2)
         # req_key = mint.transpose(req_key, 2, 3)
 
         # v: B,S,N,D -> B,N,S,D
-        req_value = mint.transpose(req_value, 1, 2)
+        value = mint.transpose(value, 1, 2)
 
         if self.use_gpa:
-            req_key = mint.repeat_interleave(req_key, repeats=self.repeat_num, dim=1)
-            req_value = mint.repeat_interleave(req_value, repeats=self.repeat_num, dim=1)
+            key = mint.repeat_interleave(key, repeats=self.repeat_num, dim=1)
+            value = mint.repeat_interleave(value, repeats=self.repeat_num, dim=1)
 
         # q: B, N, S, D
         # k: B, N, D, S
@@ -197,8 +195,8 @@ class MsAttnBackend(nn.Cell):
         # o: B, N, S, D
         output = self.core_attention(
             query,
-            req_key,
-            req_value,
+            key,
+            value,
             kv_mask
         )
 
@@ -214,8 +212,8 @@ class MsAttnBackend(nn.Cell):
 
         bs = batch_valid_length.shape[0]
 
-        key = key_cache[token_cache_loc]
-        value = value_cache[token_cache_loc]
+        key = ops.gather(key_cache, token_cache_loc, 0)
+        value = ops.gather(value_cache, token_cache_loc, 0)
 
         # B, S, H
         key = mint.reshape(key, (bs, -1, self.n_kv_heads * self.head_dim))
