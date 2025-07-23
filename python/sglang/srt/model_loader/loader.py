@@ -1558,10 +1558,11 @@ def load_model_with_cpu_quantization(
 
 
 from sglang.srt.models.ms_model.radix_qwen2 import RadixModel
+from sglang.srt.models.ms_model.radix_qwen3 import Qwen3ForCausalLM
 
 type_model_map = {
     "qwen2": RadixModel,
-
+    "qwen3": Qwen3ForCausalLM,
 }
 
 class MindSporeModelLoader(DefaultModelLoader):
@@ -1577,6 +1578,83 @@ class MindSporeModelLoader(DefaultModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         pass  # Nothing to download
 
+    def _prepare_weights(
+        self, model_name_or_path: str, revision: Optional[str]
+    ) -> Tuple[str, List[str], bool]:
+        """Prepare weights for the model.
+
+        If the model is not local, it will be downloaded."""
+        
+        is_local = os.path.isdir(model_name_or_path)
+        load_format = self.load_config.load_format
+        use_safetensors = False
+        index_file = SAFE_WEIGHTS_INDEX_NAME
+        # Some quantized models use .pt files for storing the weights.
+        assert load_format == LoadFormat.MINDSPORE
+        use_safetensors = True
+        allow_patterns = ["*.safetensors"]
+
+        if not is_local:
+            hf_folder = download_weights_from_hf(
+                model_name_or_path,
+                self.load_config.download_dir,
+                allow_patterns,
+                revision,
+                ignore_patterns=self.load_config.ignore_patterns,
+            )
+        else:
+            hf_folder = model_name_or_path
+
+        hf_weights_files: List[str] = []
+        for pattern in allow_patterns:
+            hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
+            if len(hf_weights_files) > 0:
+                if pattern == "*.safetensors":
+                    use_safetensors = True
+                break
+
+        if use_safetensors:
+            # For models like Mistral-7B-Instruct-v0.3
+            # there are both sharded safetensors files and a consolidated
+            # safetensors file. Using both breaks.
+            # Here, we download the `model.safetensors.index.json` and filter
+            # any files not found in the index.
+            if not is_local:
+                download_safetensors_index_file_from_hf(
+                    model_name_or_path,
+                    index_file,
+                    self.load_config.download_dir,
+                    revision,
+                )
+            hf_weights_files = filter_duplicate_safetensors_files(
+                hf_weights_files, hf_folder, index_file
+            )
+        else:
+            raise ValueError(f"sglang-mindspore only support safetensors format weights")
+
+        if len(hf_weights_files) == 0:
+            raise RuntimeError(
+                f"Cannot find any model weights with `{model_name_or_path}`"
+            )
+
+        return hf_folder, hf_weights_files, use_safetensors
+    
+    def _get_weights_iterator(
+        self, model_or_path: str, revision: Optional[str]
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        """Get an iterator for the model weights"""
+        """sglang-mindspore only support safetensors weight"""
+        _, hf_weights_files, use_safetensors = self._prepare_weights(
+            model_name_or_path=model_or_path, revision=revision
+        )
+
+        assert use_safetensors == True
+        weights_iterator = safetensors_weights_iterator(
+            hf_weights_files=hf_weights_files
+        )
+        
+        return weights_iterator
+
     def load_model(
         self,
         *,
@@ -1589,10 +1667,17 @@ class MindSporeModelLoader(DefaultModelLoader):
         
         arch = type_model_map[model_name]
         model = arch(model_config, self.load_config)
+        
         model.torchao_applied = True
-        model.load_weights([])
+        
+        weights_iterator = self._get_weights_iterator(
+                                    model_config.model_path, 
+                                    model_config.revision
+                                    )
+        
+        model.load_weights(weights_iterator)
         return model
-
+    
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
