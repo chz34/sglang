@@ -1,12 +1,22 @@
 import os
+import sys
+import argparse
 
 import sglang as sgl
+
+
+parser  = argparse.ArgumentParser("sglang-mindspore offline infer")
+
+parser.add_argument("--model_path,", metavar="--model_path", dest="model_path", 
+                              required=False, default="/home/ckpt/qwen2.5-7b-hf", help="the model path", type=str)
+
+args = parser.parse_args()
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_7b_instruct_800l_A2.yaml') 
 
 def main():
-    llm = sgl.Engine(model_path="/home/ckpt/qwen2.5-7b-hf",
+    llm = sgl.Engine(model_path=args.model_path,
                      device="npu",
                      load_format="mindspore",
                      max_total_tokens=20000,
