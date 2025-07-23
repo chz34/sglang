@@ -196,7 +196,6 @@ def set_ms_parallel_env(rank, world_size, init_method):
         comm_addr, comm_port = _get_host_and_ip(init_method)
         os.environ["MS_SCHED_HOST"] = str(comm_addr)
         os.environ["MS_SCHED_PORT"] = str(comm_port)
-        os.environ["DEVICE_ID"] = str(rank)
 
 
 class RankZeroFilter(logging.Filter):
@@ -306,7 +305,10 @@ class ModelRunner:
         self._model_update_group = {}
 
     def init_ms_parallel_env(self):
-
+        import mindspore
+        os.environ["DEVICE_ID"] = str(self.gpu_id)
+        os.environ["MS_NODE_ID"] = str(self.gpu_id)
+        mindspore.set_device("Ascend", self.gpu_id)
         world_size = self.tp_size * self.pp_size
         rank = self.tp_size * self.pp_rank + self.tp_rank
         if self.server_args.dist_init_addr:
