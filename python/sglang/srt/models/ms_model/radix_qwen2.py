@@ -99,6 +99,7 @@ class RadixModel(nn.Module):
         default_args = {"parallel_config": self.mf_config.parallel_config,
                         "moe_config": self.mf_config.moe_config}
 
+        self.mf_model_config.parallel_config = self.mf_config.parallel_config
         # Initial network
         with no_init_parameters():  # Delay initialization
             self.network = ParallelQwenForCausalLM_MF(self.mf_model_config)

@@ -14,7 +14,7 @@ def main():
                      attention_backend="torch_native",
                      disable_overlap_schedule=True,
                      tp_size=4,
-                     dp_size=1)
+                     dp_size=2)
 
     prompts = [
          "Hello, my name is",
