@@ -103,8 +103,8 @@ class MsNativeAttnBackend(nn.Cell):
 
         bs = batch_valid_length.shape[0]
 
-        key = key_cache[token_cache_loc]
-        value = value_cache[token_cache_loc]
+        key = ops.gather(key_cache, token_cache_loc, 0)
+        value = ops.gather(value_cache, token_cache_loc, 0)
 
         # B, S, H
         key = mint.reshape(key, (bs, -1, self.n_kv_heads * self.head_dim))
@@ -654,43 +654,6 @@ class Qwen3Model(nn.Cell):
 
         self.norm = RMSNorm(norm_dim=config.hidden_size, eps=config.rms_norm_eps, param_dtype=config.param_dtype)
 
-    def set_dynamic_inputs(self, **kwargs):
-        """Prepare inputs for dynamic shape."""
-        dynamic_input_ids = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_batch_valid_length = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_position_ids = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_q_seq_lens = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_attention_mask = None
-        have_prefix_keys_values = getattr(kwargs, "have_prefix_keys_values", False)
-
-        def get_input():
-            if self.npu_mem_size > 0:
-                return None
-            cache_list = []
-            for _ in self.model.layers:
-                cache_list.append(Tensor(shape=[None, None, None], dtype=self.config.compute_dtype))
-            return mutable(cache_list)
-
-        key_cache = get_input()
-        value_cache = get_input()
-
-        dynamic_out_cache_loc = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_token_cache_loc = Tensor(shape=[None, None], dtype=dtype.int32)
-        dynamic_kv_mask = Tensor(shape=[None, 1, 1, None], dtype=dtype.bool_)
-
-
-        if have_prefix_keys_values:
-            dynamic_prefix_keys_values = Tensor(shape=[2, None, None, None, None], dtype=dtype.float16)
-            self.set_inputs(dynamic_input_ids, None, None, None, None, None, None,
-                            dynamic_batch_valid_length, None, None,
-                            dynamic_prefix_keys_values, None, key_cache, value_cache,
-                            dynamic_out_cache_loc, dynamic_token_cache_loc, dynamic_kv_mask)
-        else:
-            self.set_inputs(dynamic_input_ids, None, None, dynamic_position_ids, dynamic_attention_mask, None, None,
-                            dynamic_batch_valid_length, None, None,
-                            None, None, dynamic_q_seq_lens, key_cache, value_cache,
-                            dynamic_out_cache_loc, dynamic_token_cache_loc, dynamic_kv_mask)
-
     # def add_flags_custom(self, is_first_iteration):
     #     """Add customized attributes for specific cells in the model."""
     #     self.add_flags(is_first_iteration=is_first_iteration)
@@ -700,8 +663,7 @@ class Qwen3Model(nn.Cell):
     #         layer.attention.add_flags(is_first_iteration=is_first_iteration)
 
     # pylint: disable=W0613
-    # @jit(jit_level="O0", infer_boost="on")
-    # @jit
+    @jit(jit_level="O0", infer_boost="on")
     def construct(self, input_ids,  position_ids=None, attention_mask=None,
                   batch_valid_length=None, batch_index=None, zactivate_len=None,
                   prefix_keys_values=None, is_prefill=True,
@@ -746,6 +708,8 @@ class Qwen3ForCausalLM(nn.Cell):
         ms.set_context(mode=ms.context.PYNATIVE_MODE)
         ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
         
+        self.prev_prefill = False
+
         self.model_config = model_config
         self.config = model_config.hf_config
         setattr(self.config, "param_dtype", dtype.bfloat16)
@@ -762,10 +726,46 @@ class Qwen3ForCausalLM(nn.Cell):
         
         
         self.lower_triangle_mask = Tensor(
-                        np.triu(np.ones(shape=(128, 128), dtype=np.float16), 1), dtype=self.config.param_dtype
-                    )
+            np.triu(np.ones(shape=(128, 128), dtype=np.float16), 1), dtype=self.config.param_dtype
+        )
         self.key_cache = []
         self.value_cache = []
+    
+    def set_model_inputs(self, is_prefill):
+        dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
+        dyn_position_ids = Tensor(shape=[None], dtype=dtype.int32)
+        num_kv_heads = self.config.num_key_value_heads
+        head_size = self.config.head_dim
+        kv_cache_shape = (None, num_kv_heads, head_size)
+        kv_cache_dtype = self.config.param_dtype
+        num_layers = self.config.num_hidden_layers
+
+        dyn_key_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
+        dyn_value_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
+        dyn_key_caches = mutable([dyn_key_cache for _ in range(num_layers)])
+        dyn_value_caches = mutable([dyn_value_cache for _ in range(num_layers)])
+
+        dyn_out_cache_loc = Tensor(shape=[None, ], dtype=dtype.int32)
+        dyn_attention_mask = Tensor(shape=[None, None], dtype=self.config.param_dtype)
+        dyn_kv_mask = Tensor(shape=[None, None, None, None], dtype=dtype.bool_)
+        dyn_batch_valid_length = Tensor(shape=[None, ], dtype=dtype.int32)
+        dyn_q_seq_lens = Tensor(shape=[None, ], dtype=dtype.int32)
+        dyn_token_cache_loc = Tensor(shape=[None, None], dtype=dtype.int32)
+
+        self.model.set_inputs(
+            input_ids=dyn_input_ids,
+            position_ids=dyn_position_ids,
+            attention_mask=dyn_attention_mask,
+            batch_valid_length=dyn_batch_valid_length,
+            is_prefill=is_prefill,
+            q_seq_lens=dyn_q_seq_lens,
+            key_cache=dyn_key_caches,
+            value_cache=dyn_value_caches,
+            out_cache_loc=dyn_out_cache_loc,
+            token_cache_loc=dyn_token_cache_loc,
+            kv_mask=dyn_kv_mask
+        )
+
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         param_dict = self.parameters_dict()
@@ -810,7 +810,8 @@ class Qwen3ForCausalLM(nn.Cell):
         query_lens_np = forward_batch.seq_lens.cpu().numpy()
         batch_valid_length = forward_batch.seq_lens.cpu().numpy()
 
-        is_finished = [False for _ in range(forward_batch.batch_size)]  # always not finished in the model forward
+        # always not finished in the model forward
+        is_finished = [False for _ in range(forward_batch.batch_size)]
 
         if is_prefill:
             q_seq_lens = query_lens_np
@@ -824,11 +825,10 @@ class Qwen3ForCausalLM(nn.Cell):
         model_inputs["batch_valid_length"] = ms.Tensor(batch_valid_length, dtype=ms.int32)
         model_inputs["position_ids"] = tensor_pt2ms(positions).to(ms.int32)
         model_inputs["q_seq_lens"] = ms.Tensor(q_seq_lens, dtype=ms.int32)
-        if is_prefill:
-            model_inputs["attention_mask"] = self.lower_triangle_mask
-        else:
-            model_inputs["attention_mask"] = None
-        model_inputs["out_cache_loc"] = ms.Tensor(forward_batch.out_cache_loc.cpu().numpy(), dtype=ms.int32)
+        model_inputs["attention_mask"] = self.lower_triangle_mask
+        model_inputs["out_cache_loc"] = ms.Tensor(
+            forward_batch.out_cache_loc.cpu().numpy(), dtype=ms.int32
+        )
         model_inputs["token_cache_loc"] = token_cache_loc
         model_inputs["kv_mask"] = kv_mask
         model_inputs["is_prefill"] = is_prefill
@@ -848,14 +848,29 @@ class Qwen3ForCausalLM(nn.Cell):
         model_inputs = self.prepare_inputs(input_ids, positions, forward_batch)
         batch_valid_length = model_inputs["batch_valid_length"]
         is_prefill = model_inputs["is_prefill"]
+
+        if self.prev_prefill != is_prefill:
+            self.set_model_inputs(is_prefill)
+        self.prev_prefill = is_prefill
+
+        if is_prefill:
+            self.model.phase = "prefill"
+        else:
+            self.model.phase = "increment"
+
         pre_gather = is_prefill and batch_valid_length is not None
+        start_time = time.time()
         hidden_state = self.model(**model_inputs)
+        end_time = time.time()
+        logger.info(f"Phase: {self.model.phase}, run model time: {end_time - start_time}s")
         if pre_gather:
             batch_valid_length = mint.cumsum(batch_valid_length, 0)
             hidden_state = self.gather(hidden_state, batch_valid_length - 1, 0)
         logits = self.lm_head(hidden_state)
         logits = ops.cast(logits, dtype.float32)
         logits = ops.reshape(logits, (-1, logits.shape[-1]))
-        logits_result = LogitsProcessorOutput(next_token_logits=torch.Tensor(logits.asnumpy()).to(input_ids.device))
+        logits_result = LogitsProcessorOutput(
+            next_token_logits=torch.Tensor(logits.asnumpy()).to(input_ids.device)
+        )
         return logits_result
 
