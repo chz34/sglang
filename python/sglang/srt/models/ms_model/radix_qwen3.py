@@ -32,7 +32,7 @@ from sglang.srt.models.ms_model.qwen3 import Qwen3Model, Qwen3Linear, Qwen3ForCa
 from mindspore.communication import create_group
 from mindspore._c_expression import GroupOptions
 
-from .utils import tensor_pt2ms
+from .utils import tensor_torch2ms, tensor_ms2torch
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +87,11 @@ class RadixQwen3Model(torch.nn.Module):
             k_cache = forward_batch.token_to_kv_pool.get_key_buffer(i)
             v_cache = forward_batch.token_to_kv_pool.get_value_buffer(i)
 
-            token_seq, num_head, head_dim = k_cache.shape
-
-            self.key_cache.append(mint.zeros(list((token_seq, num_head * 1, head_dim)), dtype=ms.bfloat16))
-            self.value_cache.append(mint.zeros(list((token_seq, num_head * 1, head_dim)), dtype=ms.bfloat16))
+            #token_seq, num_head, head_dim = k_cache.shape
+            #self.key_cache.append(mint.zeros(list((token_seq, num_head * 1, head_dim)), dtype=ms.bfloat16))
+            #self.value_cache.append(mint.zeros(list((token_seq, num_head * 1, head_dim)), dtype=ms.bfloat16))
+            self.key_cache.append(tensor_torch2ms(k_cache))
+            self.value_cache.append(tensor_torch2ms(v_cache))
 
         return mutable(self.key_cache), mutable(self.value_cache)
 
@@ -107,7 +108,7 @@ class RadixQwen3Model(torch.nn.Module):
             token_cache_loc[i, :cur_seq_length] = per_req_tokens
             kv_mask[i, 0, 0, :cur_seq_length] = False
 
-        return tensor_pt2ms(token_cache_loc), tensor_pt2ms(kv_mask)
+        return tensor_torch2ms(token_cache_loc), tensor_torch2ms(kv_mask)
 
     def prepare_inputs(self, input_ids, positions, forward_batch):
         key_cache, value_cache = self.get_kvcache(forward_batch)
@@ -128,14 +129,12 @@ class RadixQwen3Model(torch.nn.Module):
         token_cache_loc, kv_mask = self.prepare_token_cache_loc_with_mask(forward_batch)
 
         model_inputs = {}
-        model_inputs["input_ids"] = tensor_pt2ms(input_ids).to(ms.int32)
+        model_inputs["input_ids"] = tensor_torch2ms(input_ids).to(ms.int32)
         model_inputs["batch_valid_length"] = ms.Tensor(batch_valid_length, dtype=ms.int32)
-        model_inputs["position_ids"] = tensor_pt2ms(positions).to(ms.int32)
+        model_inputs["position_ids"] = tensor_torch2ms(positions)
         model_inputs["q_seq_lens"] = ms.Tensor(q_seq_lens, dtype=ms.int32)
         model_inputs["attention_mask"] = self.lower_triangle_mask
-        model_inputs["out_cache_loc"] = ms.Tensor(
-            forward_batch.out_cache_loc.cpu().numpy(), dtype=ms.int32
-        )
+        model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc)
         model_inputs["token_cache_loc"] = token_cache_loc
         model_inputs["kv_mask"] = kv_mask
         model_inputs["is_prefill"] = is_prefill
@@ -158,4 +157,6 @@ class RadixQwen3Model(torch.nn.Module):
         logits_result = LogitsProcessorOutput(
             next_token_logits=torch.Tensor(logits.asnumpy()).to(input_ids.device)
         )
+        # TODO: npu tensor ms2torch error to be fix
+        # logits_result = LogitsProcessorOutput(next_token_logits=tensor_ms2torch(logits))
         return logits_result
