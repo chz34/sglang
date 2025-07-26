@@ -111,7 +111,7 @@ class ParallelQwenForCausalLM(LlamaPreTrainedModel):
         """Prepare inputs for dynamic shape."""
         dynamic_input_ids = Tensor(shape=[None], dtype=mstype.int32)
         dynamic_batch_valid_length = Tensor(shape=[None], dtype=mstype.int32)
-        dynamic_position_ids = Tensor(shape=[None], dtype=mstype.int32)
+        dynamic_position_ids = Tensor(shape=[None], dtype=mstype.int64)
         dynamic_q_seq_lens = Tensor(shape=[None], dtype=mstype.int32)
         dynamic_attention_mask = None
         have_prefix_keys_values = getattr(kwargs, "have_prefix_keys_values", False)
@@ -127,7 +127,7 @@ class ParallelQwenForCausalLM(LlamaPreTrainedModel):
         key_cache = get_input()
         value_cache = get_input()
 
-        dynamic_out_cache_loc = Tensor(shape=[None], dtype=mstype.int32)
+        dynamic_out_cache_loc = Tensor(shape=[None], dtype=mstype.int64)
         dynamic_token_cache_loc = Tensor(shape=[None, None], dtype=mstype.int32)
         dynamic_kv_mask = Tensor(shape=[None, 1, 1, None], dtype=mstype.bool_)
 
