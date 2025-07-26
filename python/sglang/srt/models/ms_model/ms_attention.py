@@ -140,10 +140,9 @@ class MsAttnBackend(nn.Cell):
         key = mint.reshape(key, (-1, self.n_kv_heads, self.head_dim))
         value = mint.reshape(value, (-1, self.n_kv_heads, self.head_dim))
 
-        # key_cache[loc] = key.to(self.dtype)
-        key = ops.depend(key, ops.scatter_update(key_cache, out_cache_loc, key))
-        # value_cache[loc] = value.to(self.dtype)
-        key = ops.depend(key, ops.scatter_update(value_cache, out_cache_loc, value))
+        out_cache_loc = out_cache_loc.contiguous().reshape(-1, 1, 1).expand_as(key)
+        key = ops.depend(key, key_cache.scatter_(0, out_cache_loc, key))
+        key = ops.depend(key, value_cache.scatter_(0, out_cache_loc, value))
 
         return key
 

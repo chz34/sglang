@@ -39,7 +39,7 @@ from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_
 from sglang.srt.distributed.utils import divide
 
 
-from .utils import tensor_pt2ms
+from .utils import tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,9 @@ class MsNativeAttnBackend(nn.Cell):
         key = mint.reshape(key, (-1, self.n_kv_heads, self.head_dim))
         value = mint.reshape(value, (-1, self.n_kv_heads, self.head_dim))
 
-        key = ops.depend(key, ops.scatter_update(key_cache, out_cache_loc, key))
-        key = ops.depend(key, ops.scatter_update(value_cache, out_cache_loc, value))
+        out_cache_loc = out_cache_loc.contiguous().reshape(-1, 1, 1).expand_as(key)
+        key = ops.depend(key, key_cache.scatter_(0, out_cache_loc, key))
+        key = ops.depend(key, value_cache.scatter_(0, out_cache_loc, value))
 
         return key
 
@@ -761,51 +762,6 @@ class Qwen3Model(nn.Cell):
 
         self.norm = RMSNorm(norm_dim=config.hidden_size, eps=config.rms_norm_eps, param_dtype=config.param_dtype)
 
-    def set_dynamic_inputs(self, **kwargs):
-        """Prepare inputs for dynamic shape."""
-        dynamic_input_ids = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_batch_valid_length = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_position_ids = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_q_seq_lens = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_attention_mask = None
-        have_prefix_keys_values = getattr(kwargs, "have_prefix_keys_values", False)
-
-        def get_input():
-            if self.npu_mem_size > 0:
-                return None
-            cache_list = []
-            for _ in self.model.layers:
-                cache_list.append(Tensor(shape=[None, None, None], dtype=self.config.compute_dtype))
-            return mutable(cache_list)
-
-        key_cache = get_input()
-        value_cache = get_input()
-
-        dynamic_out_cache_loc = Tensor(shape=[None], dtype=dtype.int32)
-        dynamic_token_cache_loc = Tensor(shape=[None, None], dtype=dtype.int32)
-        dynamic_kv_mask = Tensor(shape=[None, 1, 1, None], dtype=dtype.bool_)
-
-
-        if have_prefix_keys_values:
-            dynamic_prefix_keys_values = Tensor(shape=[2, None, None, None, None], dtype=dtype.float16)
-            self.set_inputs(dynamic_input_ids, None, None, None, None, None, None,
-                            dynamic_batch_valid_length, None, None,
-                            dynamic_prefix_keys_values, None, key_cache, value_cache,
-                            dynamic_out_cache_loc, dynamic_token_cache_loc, dynamic_kv_mask)
-        else:
-            self.set_inputs(dynamic_input_ids, None, None, dynamic_position_ids, dynamic_attention_mask, None, None,
-                            dynamic_batch_valid_length, None, None,
-                            None, None, dynamic_q_seq_lens, key_cache, value_cache,
-                            dynamic_out_cache_loc, dynamic_token_cache_loc, dynamic_kv_mask)
-
-    # def add_flags_custom(self, is_first_iteration):
-    #     """Add customized attributes for specific cells in the model."""
-    #     self.add_flags(is_first_iteration=is_first_iteration)
-    #     self.model.add_flags(is_first_iteration=is_first_iteration)
-    #     for layer in self.model.layers:
-    #         layer.add_flags(is_first_iteration=is_first_iteration)
-    #         layer.attention.add_flags(is_first_iteration=is_first_iteration)
-
     # pylint: disable=W0613
     @jit(jit_level="O0", infer_boost="on")
     # @jit
@@ -897,7 +853,7 @@ class Qwen3ForCausalLM(nn.Cell):
 
     def set_model_inputs(self, is_prefill):
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
-        dyn_position_ids = Tensor(shape=[None], dtype=dtype.int32)
+        dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
 
         block_size = 128
         num_kv_heads = self.config.num_key_value_heads
@@ -916,7 +872,7 @@ class Qwen3ForCausalLM(nn.Cell):
 
         dyn_out_cache_loc = Tensor(shape=[
             None,
-        ], dtype=dtype.int32)
+        ], dtype=dtype.int64)
         dynamic_attention_mask = Tensor(shape=[None, None],
                                         dtype=self.config.param_dtype)
         dynamic_kv_mask = Tensor(shape=[None, None, None, None],
@@ -948,7 +904,7 @@ class Qwen3ForCausalLM(nn.Cell):
 
         for (name, weight) in weights:
             if name in param_dict:
-                ms_weight = tensor_pt2ms(weight)
+                ms_weight = tensor_torch2ms(weight).move_to("Ascend")
                 param = param_dict[name]
                 if hasattr(param, "weight_load"):
                     weight_load = getattr(param, "weight_load")
