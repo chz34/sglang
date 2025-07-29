@@ -1,20 +1,28 @@
 import os
+import argparse
 
 import sglang as sgl
 
+parser = argparse.ArgumentParser("sglang-mindspore dist infer")
+
+parser.add_argument("--model_path", metavar="--model_path", dest="model_path",
+                    required=False, default="/home/ckpt/qwen3-8b", help="the model path",
+                    type=str)
+
+args = parser.parse_args()
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_32b_instruct_800l_A2.yaml') 
 
 def main():
-    llm = sgl.Engine(model_path="/home/ckpt/Qwen2.5-32B-Instruct",
+    llm = sgl.Engine(model_path=args.model_path,
                      device="npu",
                      load_format="mindspore",
                      max_total_tokens=20000,
                      attention_backend="torch_native",
                      disable_overlap_schedule=True,
-                     tp_size=4,
-                     dp_size=2)
+                     tp_size=2,
+                     dp_size=1)
 
     prompts = [
          "Hello, my name is",
