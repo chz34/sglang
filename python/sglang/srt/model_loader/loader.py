@@ -1524,10 +1524,11 @@ def load_model_with_cpu_quantization(
 
 from sglang.srt.models.ms_model.radix_qwen2 import RadixModel
 from sglang.srt.models.ms_model.radix_qwen3 import Qwen3ForCausalLM
+from sglang.srt.models.ms_model.radix_qwen3 import RadixQwen3Model
 
 type_model_map = {
     "qwen2": RadixModel,
-    "qwen3": Qwen3ForCausalLM,
+    "qwen3": RadixQwen3Model,
 }
 
 class MindSporeModelLoader(DefaultModelLoader):
