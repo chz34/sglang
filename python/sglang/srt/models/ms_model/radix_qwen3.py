@@ -1,8 +1,4 @@
-import os
-import time
-import math
 import logging
-from functools import partial
 from typing import Any, Dict, Iterable, Optional, Tuple, Union, Type
 
 import numpy as np
@@ -13,19 +9,14 @@ import torch
 import mindspore as ms
 from mindspore import nn
 from mindspore import Tensor, JitConfig, Model, mutable, dtype, Parameter
-from mindspore.communication.management import get_group_size
-from mindspore.communication.comm_func import barrier
-from mindspore.nn.utils import no_init_parameters
 from mindspore import ops, mint, jit
-from mindspore.ops.operations.nn_ops import IncreFlashAttention, FlashAttentionScore
 
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size, get_attention_tp_group
+from sglang.srt.distributed import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 
 from sglang.srt.models.ms_model.qwen3 import Qwen3Model, Qwen3Linear, Qwen3ForCausalLM
 
@@ -50,19 +41,25 @@ class RadixQwen3Model(torch.nn.Module):
 
         self.prev_prefill = False
 
+        logger.info(
+            "Qwen3ForCausalLM tp size %d tp rank %d",
+            get_tensor_model_parallel_world_size(),
+            get_tensor_model_parallel_rank()
+        )
         # ms.set_device("Ascend", get_attention_tp_rank())
         ms.communication.init("hccl")
         tp_group_name = "TP"
         self.group_name = tp_group_name
         # test_group = torch.distributed.new_group([0, 1], backend="hccl")
-        test_group = get_attention_tp_group().device_group
-        self.local_rank = torch.distributed.get_rank(test_group)
+        tp = get_tp_group()
+        device_group = tp.device_group
+        self.local_rank = torch.distributed.get_rank(device_group)
         # self.local_rank = test_group.local_rank
-        hccl_comm_handle = test_group._get_backend(torch.device("npu")).get_hccl_comm(self.local_rank)
+        hccl_comm_handle = device_group._get_backend(torch.device("npu")).get_hccl_comm(self.local_rank)
         group_options = GroupOptions()
         group_options.hccl_config = {"hcom": hccl_comm_handle}
-        create_group(tp_group_name, [0, 1], group_options)
-        logger.error("TP Group created")
+        create_group(tp_group_name, tp.ranks, group_options)
+        logger.info("TP Group created")
 
         self.config = model_config.hf_config
         self.model = Qwen3ForCausalLM(model_config, load_config, prefix)
@@ -73,7 +70,6 @@ class RadixQwen3Model(torch.nn.Module):
         self.key_cache = []
         self.value_cache = []
 
-        logger.error(f"Qwen3ForCausalLM tp size {get_attention_tp_size()} tp rank {get_attention_tp_rank()}")
 
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -114,12 +110,10 @@ class RadixQwen3Model(torch.nn.Module):
         key_cache, value_cache = self.get_kvcache(forward_batch)
 
         is_prefill = forward_batch.forward_mode.is_extend()
+        is_prefill = is_prefill and forward_batch.extend_prefix_lens.sum().item() == 0
 
         query_lens_np = forward_batch.seq_lens.cpu().numpy()
         batch_valid_length = forward_batch.seq_lens.cpu().numpy()
-
-        # always not finished in the model forward
-        is_finished = [False for _ in range(forward_batch.batch_size)]
 
         if is_prefill:
             q_seq_lens = query_lens_np
@@ -151,7 +145,6 @@ class RadixQwen3Model(torch.nn.Module):
                 positions: torch.Tensor,
                 forward_batch: ForwardBatch) -> Tensor:
 
-        logger.info(f"forward {input_ids}")
         model_inputs = self.prepare_inputs(input_ids, positions, forward_batch)
         logits = self.model(**model_inputs)
         logits_result = LogitsProcessorOutput(
