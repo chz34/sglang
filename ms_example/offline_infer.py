@@ -8,7 +8,7 @@ import sglang as sgl
 parser  = argparse.ArgumentParser("sglang-mindspore offline infer")
 
 parser.add_argument("--model_path,", metavar="--model_path", dest="model_path", 
-                              required=False, default="/home/ckpt/qwen2.5-7b-hf", help="the model path", type=str)
+                              required=False, default="/home/ckpt/Qwen3-8B", help="the model path", type=str)
 
 args = parser.parse_args()
 
