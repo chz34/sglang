@@ -6,7 +6,7 @@ import sglang as sgl
 parser = argparse.ArgumentParser("sglang-mindspore dist infer")
 
 parser.add_argument("--model_path", metavar="--model_path", dest="model_path",
-                    required=False, default="/home/ckpt/qwen3-8b", help="the model path",
+                    required=False, default="/home/ckpt/Qwen3-8B", help="the model path",
                     type=str)
 
 args = parser.parse_args()
@@ -18,7 +18,7 @@ def main():
     llm = sgl.Engine(model_path=args.model_path,
                      device="npu",
                      load_format="mindspore",
-                     max_total_tokens=20000,
+                     max_total_tokens=100000,
                      attention_backend="torch_native",
                      disable_overlap_schedule=True,
                      tp_size=2,

@@ -1,39 +1,25 @@
-import os
 import time
 import math
 import logging
-from functools import partial
-from typing import Any, Dict, Iterable, Optional, Tuple, Union, Type
+from typing import Iterable, Optional, Tuple, Union, Type
 
 import numpy as np
 
 import torch
-# from torch import nn
 
 import mindspore as ms
 from mindspore import nn
 from mindspore import Tensor, JitConfig, Model, mutable, dtype, Parameter
-from mindspore.communication.management import get_group_size
-from mindspore.communication.comm_func import barrier
-from mindspore.nn.utils import no_init_parameters
 from mindspore import ops, mint, jit
 from mindspore.ops.operations.nn_ops import IncreFlashAttention, FlashAttentionScore
 
 import mindspore.common.dtype as mstype
 import mindspore.ops.operations as P
 
-from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
-from sglang.srt.configs.load_config import LoadConfig, LoadFormat
+from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 
-from sglang.srt.distributed import (
-    GroupCoordinator,
-    get_tensor_model_parallel_world_size,
-    get_tp_group,
-    tensor_model_parallel_all_reduce,
-)
+from sglang.srt.distributed import get_tensor_model_parallel_world_size
 
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size, get_attention_tp_group
 from sglang.srt.distributed.utils import divide
@@ -113,9 +99,8 @@ class MsNativeAttnBackend(nn.Cell):
     def decode_ifa(self, query, batch_valid_length, attn_mask=None, q_seq_lens=None,
                     key_cache=None, value_cache=None, token_cache_loc=None, kv_mask=None):
         # B, S, H
-        query = mint.reshape(query, (-1, 1, self.n_heads * self.head_dim))
-
         bs = batch_valid_length.shape[0]
+        query = mint.reshape(query, (bs, -1, self.n_heads * self.head_dim))
 
         # key = key_cache[token_cache_loc]
         # value = value_cache[token_cache_loc]
@@ -610,9 +595,12 @@ class Qwen3Attention(nn.Cell):
         self.rope_theta = int(config.rope_theta)
         self.param_dtype = config.param_dtype
         self.max_position = config.max_position_embeddings
-        self.rope_type = config.rope_scaling["rope_type"]
-        self.rope_factor = config.rope_scaling["factor"]
-        self.rope_max_position_embeddings = config.rope_scaling["original_max_position_embeddings"]
+        if config.rope_scaling:
+            self.rope_type = config.rope_scaling["rope_type"]
+            self.rope_factor = config.rope_scaling["factor"]
+            self.rope_max_position_embeddings = config.rope_scaling["original_max_position_embeddings"]
+        else:
+            self.rope_type = None
 
         self.attn = MsNativeAttnBackend(config,
                                     config.num_attention_heads // self.tp_size,
@@ -849,8 +837,6 @@ class Qwen3ForCausalLM(nn.Cell):
         self.key_cache = []
         self.value_cache = []
 
-        # logger.error(f"Qwen3ForCausalLM tp size {get_attention_tp_size()} tp rank {get_attention_tp_rank()}")
-
     def set_model_inputs(self, is_prefill):
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
         dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
@@ -925,12 +911,11 @@ class Qwen3ForCausalLM(nn.Cell):
         else:
             self.model.phase = "increment"
 
-        # logger.error(f"run model input_ids: {model_inputs}")
         pre_gather = is_prefill and batch_valid_length is not None
         start_time = time.time()
         hidden_state = self.model(**model_inputs)
         end_time = time.time()
-        logger.error(f"run model time: {end_time - start_time}s")
+        logger.info(f"run model time: {end_time - start_time}s")
         if pre_gather:
             batch_valid_length = mint.cumsum(batch_valid_length, 0)
             hidden_state = self.gather(hidden_state, batch_valid_length - 1, 0)
