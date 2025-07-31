@@ -44,6 +44,7 @@ class ModelImpl(str, Enum):
     AUTO = "auto"
     SGLANG = "sglang"
     TRANSFORMERS = "transformers"
+    MINDSPORE = "mindspore"
 
 
 class ModelConfig:

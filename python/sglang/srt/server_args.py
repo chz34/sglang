@@ -638,7 +638,6 @@ class ServerArgs:
                 "bitsandbytes",
                 "layered",
                 "remote",
-                'mindspore',
             ],
             help="The format of the model weights to load. "
             '"auto" will try to load the weights in the safetensors format '
@@ -705,6 +704,7 @@ class ServerArgs:
             "implementation is available.\n"
             '* "sglang" will use the SGLang model implementation.\n'
             '* "transformers" will use the Transformers model '
+            '* "mindspore" will use the MindSpore model '
             "implementation.\n",
         )
 

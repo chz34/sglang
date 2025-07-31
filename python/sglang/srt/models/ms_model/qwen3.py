@@ -2,6 +2,7 @@ import time
 import math
 import logging
 from typing import Iterable, Optional, Tuple, Union, Type
+from functools import lru_cache
 
 import numpy as np
 
@@ -12,23 +13,25 @@ from mindspore import nn
 from mindspore import Tensor, JitConfig, Model, mutable, dtype, Parameter
 from mindspore import ops, mint, jit
 from mindspore.ops.operations.nn_ops import IncreFlashAttention, FlashAttentionScore
-
 import mindspore.common.dtype as mstype
 import mindspore.ops.operations as P
 
-from sglang.srt.configs.load_config import LoadConfig
-from sglang.srt.configs.model_config import ModelConfig
-
-from sglang.srt.distributed import get_tensor_model_parallel_world_size
-
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size, get_attention_tp_group
+from sglang.srt.distributed import (
+    get_tp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from sglang.srt.distributed.utils import divide
-
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
 from .utils import tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
+Qwen3Config = None
+
+def _get_tp_group_name():
+    return get_tp_group().unique_name
 
 class MsNativeAttnBackend(nn.Cell):
     """Paged Attention Manager."""
@@ -148,8 +151,8 @@ class VocabParallelEmbedding(nn.Cell):
         self.embedding_dim = config.hidden_size
         # self.sequence_parallel = config.sequence_parallel
         self.tensor_parallel_group_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_attention_tp_rank() if self.tensor_parallel_group_size > 1 else 0
-        self.tp_size = get_attention_tp_size()
+        tp_rank = get_tensor_model_parallel_rank() if self.tensor_parallel_group_size > 1 else 0
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         (
             self.vocab_start_index,
@@ -166,7 +169,7 @@ class VocabParallelEmbedding(nn.Cell):
 
         # if tp_rank > 0:
         print(f"zhq tp_rank:{tp_rank}, tensor_parallel_group_size:{self.tensor_parallel_group_size}, self.weight:{self.weight.shape}")
-        tp_group_name = get_attention_tp_group().unique_name
+        tp_group_name = _get_tp_group_name()
         self.all_reduce = ops.AllReduce(group=tp_group_name)
         self.reduce_scatter_tensor = ops.ReduceScatter(group=tp_group_name)
 
@@ -190,13 +193,13 @@ class VocabParallelEmbedding(nn.Cell):
         output = self.all_reduce(output_parallel)
         return output
 
-    def weight_load(self, param: Tensor, weight: Tensor) -> None:
-        tp_rank = get_attention_tp_rank()
+    def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
+        tp_rank = get_tensor_model_parallel_rank()
         copy_dim = 0
         shard_size = param.shape[copy_dim]
         start_idx = tp_rank * shard_size
         weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
-        param.set_data(weight)
+        param.set_data(tensor_torch2ms(weight))
         return None
 
     def _vocab_range_from_global_vocab_size(self, global_vocab_size, rank, world_size):
@@ -235,7 +238,7 @@ class Qwen3ColParallelLinear(nn.Cell):
     def __init__(self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool) -> None:
         super().__init__()
 
-        self.tp_size = get_attention_tp_size()
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.param_dtype = param_dtype
         self.input_size = input_size
         self.output_size = output_size // self.tp_size
@@ -264,14 +267,14 @@ class Qwen3ColParallelLinear(nn.Cell):
             x = self.bias_add(x, self.bias)
         return x.view(*origin_shape[:-1], -1)
 
-    def weight_load(self, param: Tensor, weight: Tensor) -> None:
-        tp_rank = get_attention_tp_rank()
+    def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
+        tp_rank = get_tensor_model_parallel_rank()
         copy_dim = 0
         shard_size = param.shape[copy_dim]
         start_idx = tp_rank * shard_size
         weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
 
-        param.set_data(weight)
+        param.set_data(tensor_torch2ms(weight))
         return None
 
 
@@ -279,7 +282,7 @@ class Qwen3RowParallelLinear(nn.Cell):
     def __init__(self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool) -> None:
         super().__init__()
 
-        self.tp_size = get_attention_tp_size()
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.param_dtype = param_dtype
         self.input_size = input_size // self.tp_size
         self.output_size = output_size
@@ -300,7 +303,7 @@ class Qwen3RowParallelLinear(nn.Cell):
                 mint.zeros(self.output_size, dtype=self.param_dtype)
             )
             setattr(self.bias, "weight_load", self.weight_load)
-        tp_group_name = get_attention_tp_group().unique_name
+        tp_group_name = _get_tp_group_name()
         self.all_reduce = ops.AllReduce(group=tp_group_name)
 
     def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
@@ -311,14 +314,14 @@ class Qwen3RowParallelLinear(nn.Cell):
         x = self.all_reduce(x)
         return x.view(*origin_shape[:-1], -1)
 
-    def weight_load(self, param: Tensor, weight: Tensor) -> None:
-        tp_rank = get_attention_tp_rank()
+    def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
+        tp_rank = get_tensor_model_parallel_rank()
         copy_dim = 1
         shard_size = param.shape[copy_dim]
         start_idx = tp_rank * shard_size
         weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
 
-        param.set_data(weight)
+        param.set_data(tensor_torch2ms(weight))
         return None
 
 
@@ -584,7 +587,7 @@ class Qwen3Attention(nn.Cell):
     def __init__(self, config) -> None:
         super().__init__()
 
-        self.tp_size = get_attention_tp_size()
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -789,9 +792,9 @@ class Qwen3Model(nn.Cell):
 class GatherLastDim(nn.Cell):
     def __init__(self):
         super().__init__()
-        tp_group_name = get_attention_tp_group().unique_name
+        tp_group_name = _get_tp_group_name()
         self.all_gather = ops.AllGather(group=tp_group_name)
-        self.world_size = get_attention_tp_size()
+        self.world_size = get_tensor_model_parallel_world_size()
         self.split = ops.Split(axis=0, output_num=self.world_size)
 
     def construct(self, input: Tensor) -> Tensor:
@@ -803,20 +806,19 @@ class GatherLastDim(nn.Cell):
 
 class Qwen3ForCausalLM(nn.Cell):
     def __init__(self,
-                model_config: ModelConfig,
-                load_config: LoadConfig,
+                config: Qwen3Config,
+                quant_config: Optional[QuantizationConfig] = None,
                 prefix: str = "",) -> None:
         super().__init__()
 
         # ms.set_context(infer_boost="on")
         # ms.set_context(mode=ms.context.PYNATIVE_MODE)
         # ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
-        # ms.set_device("Ascend", get_attention_tp_rank())
+        # ms.set_device("Ascend", get_tensor_model_parallel_rank())
 
         self.prev_prefill = False
 
-        self.model_config = model_config
-        self.config = model_config.hf_config
+        self.config = config
         setattr(self.config, "param_dtype", dtype.bfloat16)
         pynative_model = Qwen3Model(self.config)
         self.model = pynative_model
@@ -841,8 +843,6 @@ class Qwen3ForCausalLM(nn.Cell):
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
         dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
 
-        block_size = 128
-        num_kv_heads = self.config.num_key_value_heads
         head_size = self.config.head_dim
         kv_cache_shape = (None, None, head_size)
 
@@ -890,13 +890,14 @@ class Qwen3ForCausalLM(nn.Cell):
 
         for (name, weight) in weights:
             if name in param_dict:
-                ms_weight = tensor_torch2ms(weight).move_to("Ascend")
                 param = param_dict[name]
                 if hasattr(param, "weight_load"):
                     weight_load = getattr(param, "weight_load")
-                    weight_load(param, ms_weight)
+                    weight_load(param, weight)
+                    param.set_data(param.move_to("Ascend"))
                 else:
-                    param.set_data(ms_weight)
+                    param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
+                # Make sure the weight is loaded on device, so the kv cache calculation is correct.
 
     def construct(self, **model_inputs)-> Tensor:
         batch_valid_length = model_inputs["batch_valid_length"]
@@ -924,3 +925,4 @@ class Qwen3ForCausalLM(nn.Cell):
         logits = ops.cast(logits, dtype.float32)
         logits = ops.reshape(logits, (-1, logits.shape[-1]))
         return logits
+

@@ -17,10 +17,9 @@ os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_32b_i
 def main():
     llm = sgl.Engine(model_path=args.model_path,
                      device="npu",
-                     load_format="mindspore",
-                     max_total_tokens=100000,
+                     model_impl="mindspore",
+                     max_total_tokens=20000,
                      attention_backend="torch_native",
-                     disable_overlap_schedule=True,
                      tp_size=2,
                      dp_size=1)
 
