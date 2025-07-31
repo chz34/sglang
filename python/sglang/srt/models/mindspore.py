@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Iterable, Optional, Tuple, Union, Type
+from typing import Any, Iterable, Optional, Tuple, Union
 
 import numpy as np
 
@@ -8,78 +8,67 @@ import torch
 
 import mindspore as ms
 from mindspore import nn
-from mindspore import Tensor, JitConfig, Model, mutable, dtype, Parameter
-from mindspore import ops, mint, jit
+from mindspore import Tensor, mutable
 
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
-from sglang.srt.configs.load_config import LoadConfig, LoadFormat
-from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-
-from sglang.srt.distributed import (get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank,
-                                     GroupCoordinator)
-from sglang.srt.layers.dp_attention import get_attention_tp_group
-from sglang.srt.models.ms_model.qwen3 import Qwen3Model, Qwen3Linear, Qwen3ForCausalLM
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.distributed import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from sglang.srt.models.ms_model.qwen3 import Qwen3ForCausalLM
 
 from mindspore.communication import create_group
 from mindspore._c_expression import GroupOptions
 
-from .utils import tensor_torch2ms, tensor_ms2torch
+from sglang.srt.models.ms_model.utils import tensor_torch2ms, tensor_ms2torch
+
+type_model_map = {
+    "qwen3": Qwen3ForCausalLM,
+}
 
 logger = logging.getLogger(__name__)
-
-
-class RadixQwen3Model(torch.nn.Module):
+class MindSporeForCausalLM(torch.nn.Module):
     def __init__(self,
-                model_config: ModelConfig,
-                load_config: LoadConfig,
+                config: Any,
+                quant_config: Optional[QuantizationConfig] = None,
                 prefix: str = "",) -> None:
         super().__init__()
+        self.config = config
 
-        ms.set_context(infer_boost="on")
+        ms.set_context(infer_boost="on", jit_level="O0")
         ms.set_context(mode=ms.context.PYNATIVE_MODE)
         ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
 
-        self.prev_prefill = False
-
         logger.info(
-            "Qwen3ForCausalLM tp size %d tp rank %d",
+            "MindSporeForCausalLM tp size %d tp rank %d",
             get_tensor_model_parallel_world_size(),
             get_tensor_model_parallel_rank()
         )
+        # ms.set_device("Ascend", get_attention_tp_rank())
+        ms.communication.init("hccl")
+        tp = get_tp_group()
+        tp_group_name = tp.unique_name
+        self.group_name = tp_group_name
+        device_group = tp.device_group
 
-        self.reuse_hccl_comm()
+        self.local_rank = torch.distributed.get_rank(device_group)
+        # self.local_rank = test_group.local_rank
+        hccl_comm_handle = device_group._get_backend(torch.device("npu")).get_hccl_comm(self.local_rank)
+        group_options = GroupOptions()
+        group_options.hccl_config = {"hcom": hccl_comm_handle}
+        create_group(tp_group_name, tp.ranks, group_options)
+        logger.info("TP Group created")
 
-        self.config = model_config.hf_config
-        self.model = Qwen3ForCausalLM(model_config, load_config, prefix)
+        model_type = self.config.model_type
+        if model_type not in type_model_map:
+            raise ValueError(f"Unsupported arch {arch}")
+        arch = type_model_map[model_type]
+        self.model = arch(config=config, quant_config=quant_config)
 
         self.lower_triangle_mask = Tensor(
-            np.triu(np.ones(shape=(128, 128), dtype=np.float16), 1), dtype=self.config.param_dtype
+            np.triu(np.ones(shape=(128, 128)), 1), dtype=self.config.param_dtype
         )
         self.key_cache = []
         self.value_cache = []
-
-    def reuse_hccl_comm(self):
-        ms.communication.init("hccl")
-        all_groups = self.get_all_groups()
-        for group in all_groups:
-            # Torch ProcessGroupHccl
-            device_group = group.device_group
-            # GroupCoordinator unique_name
-            group_name = group.unique_name
-            local_rank = torch.distributed.get_rank(device_group)
-            hccl_comm_handle = device_group._get_backend(torch.device("npu")).get_hccl_comm(local_rank)
-            print(f"Try to reuse torch group: {device_group}, group_name: {group_name}, local rank: {local_rank},"
-                  f"hccl communicator handle: {hex(hccl_comm_handle)}", flush=True)
-
-            # Create MS communication group by hccl comm handle to reuse Torch group.
-            group_options = GroupOptions()
-            group_options.hccl_config = {"hccl_comm": hccl_comm_handle}
-            create_group(group_name, group.ranks, group_options)
-
-    def get_all_groups(self) -> list[GroupCoordinator]:
-        all_groups = [get_tp_group(), get_attention_tp_group()]
-        return all_groups
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
@@ -162,3 +151,6 @@ class RadixQwen3Model(torch.nn.Module):
         # TODO: npu tensor ms2torch error to be fix
         # logits_result = LogitsProcessorOutput(next_token_logits=tensor_ms2torch(logits))
         return logits_result
+
+
+EntryClass = [MindSporeForCausalLM]

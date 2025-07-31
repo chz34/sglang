@@ -11,9 +11,8 @@ server_process, port = launch_server_cmd(
         --model-path /home/ckpt/Qwen3-8B \
         --host 0.0.0.0 \
         --device npu \
-        --load-format mindspore \
-        --max-total-tokens 20000 \
-        --disable-overlap-schedule \
+        --model-impl mindspore \
+        --max-total-tokens=20000 \
         --attention-backend torch_native \
         --tp-size 1 \
         --dp-size 1",

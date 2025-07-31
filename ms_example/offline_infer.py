@@ -4,7 +4,6 @@ import argparse
 
 import sglang as sgl
 
-
 parser  = argparse.ArgumentParser("sglang-mindspore offline infer")
 
 parser.add_argument("--model_path,", metavar="--model_path", dest="model_path", 
@@ -18,12 +17,12 @@ os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_7b_in
 def main():
     llm = sgl.Engine(model_path=args.model_path,
                      device="npu",
-                     load_format="mindspore",
+                     model_impl="mindspore",
                      max_total_tokens=20000,
                      attention_backend="torch_native",
-                     disable_overlap_schedule=True,
                      tp_size=1,
-                     dp_size=1)
+                     dp_size=1,
+                     log_level="INFO")
 
     prompts = [
          "Hello, my name is",
