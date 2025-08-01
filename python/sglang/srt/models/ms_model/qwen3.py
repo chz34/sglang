@@ -166,7 +166,7 @@ class VocabParallelEmbedding(nn.Cell):
 
         # if tp_rank > 0:
         print(f"zhq tp_rank:{tp_rank}, tensor_parallel_group_size:{self.tensor_parallel_group_size}, self.weight:{self.weight.shape}")
-        tp_group_name = "TP"
+        tp_group_name = get_attention_tp_group().unique_name
         self.all_reduce = ops.AllReduce(group=tp_group_name)
         self.reduce_scatter_tensor = ops.ReduceScatter(group=tp_group_name)
 
@@ -300,7 +300,7 @@ class Qwen3RowParallelLinear(nn.Cell):
                 mint.zeros(self.output_size, dtype=self.param_dtype)
             )
             setattr(self.bias, "weight_load", self.weight_load)
-        tp_group_name = "TP"
+        tp_group_name = get_attention_tp_group().unique_name
         self.all_reduce = ops.AllReduce(group=tp_group_name)
 
     def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
@@ -789,7 +789,7 @@ class Qwen3Model(nn.Cell):
 class GatherLastDim(nn.Cell):
     def __init__(self):
         super().__init__()
-        tp_group_name = "TP"
+        tp_group_name = get_attention_tp_group().unique_name
         self.all_gather = ops.AllGather(group=tp_group_name)
         self.world_size = get_attention_tp_size()
         self.split = ops.Split(axis=0, output_num=self.world_size)

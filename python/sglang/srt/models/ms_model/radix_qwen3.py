@@ -16,8 +16,9 @@ from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
-from sglang.srt.distributed import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
-
+from sglang.srt.distributed import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank,
+                                   GroupCoordinator
+from sglang.srt.layers.dp_attention import get_attention_tp_group
 from sglang.srt.models.ms_model.qwen3 import Qwen3Model, Qwen3Linear, Qwen3ForCausalLM
 
 from mindspore.communication import create_group
@@ -46,20 +47,8 @@ class RadixQwen3Model(torch.nn.Module):
             get_tensor_model_parallel_world_size(),
             get_tensor_model_parallel_rank()
         )
-        # ms.set_device("Ascend", get_attention_tp_rank())
-        ms.communication.init("hccl")
-        tp_group_name = "TP"
-        self.group_name = tp_group_name
-        # test_group = torch.distributed.new_group([0, 1], backend="hccl")
-        tp = get_tp_group()
-        device_group = tp.device_group
-        self.local_rank = torch.distributed.get_rank(device_group)
-        # self.local_rank = test_group.local_rank
-        hccl_comm_handle = device_group._get_backend(torch.device("npu")).get_hccl_comm(self.local_rank)
-        group_options = GroupOptions()
-        group_options.hccl_config = {"hcom": hccl_comm_handle}
-        create_group(tp_group_name, tp.ranks, group_options)
-        logger.info("TP Group created")
+
+        self.reuse_hccl_comm()
 
         self.config = model_config.hf_config
         self.model = Qwen3ForCausalLM(model_config, load_config, prefix)
@@ -70,7 +59,27 @@ class RadixQwen3Model(torch.nn.Module):
         self.key_cache = []
         self.value_cache = []
 
+    def reuse_hccl_comm(self):
+        ms.communication.init("hccl")
+        all_groups = self.get_all_groups()
+        for group in all_groups:
+            # Torch ProcessGroupHccl
+            device_group = group.device_group
+            # GroupCoordinator unique_name
+            group_name = group.unique_name
+            local_rank = torch.distributed.get_rank(device_group)
+            hccl_comm_handle = device_group._get_backend(torch.device("npu")).get_hccl_comm(local_rank)
+            print(f"Try to reuse torch group: {device_group}, group_name: {group_name}, local rank: {local_rank},"
+                  f"hccl communicator handle: {hex(hccl_comm_handle)}", flush=True)
 
+            # Create MS communication group by hccl comm handle to reuse Torch group.
+            group_options = GroupOptions()
+            group_options.hccl_config = {"hccl_comm": hccl_comm_handle}
+            create_group(group_name, group.ranks, group_options)
+
+    def get_all_groups(self) -> list[GroupCoordinator]:
+        all_groups = [get_tp_group(), get_attention_tp_group()]
+        return all_groups
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
