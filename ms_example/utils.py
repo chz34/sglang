@@ -27,7 +27,7 @@ def get_args():
     parser.add_argument("--max_total_tokens,", metavar="--max_total_tokens", dest="max_total_tokens",
                                 required=False, default=20000, help="the max total tokens", type=int)
     parser.add_argument("--attention_backend,", metavar="--attention_backend", dest="attention_backend", 
-                                required=False, default="torch_native", help="the attention backend", type=str)
+                                required=False, default="ascend", help="the attention backend", type=str)
     parser.add_argument("--tp_size,", metavar="--tp_size", dest="tp_size",
                                 required=False, default=1, help="the tp parallel size", type=int)
     parser.add_argument("--dp_size,", metavar="--dp_size", dest="dp_size",
