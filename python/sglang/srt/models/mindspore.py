@@ -67,6 +67,9 @@ class MindSporeForCausalLM(torch.nn.Module):
         self.lower_triangle_mask = Tensor(
             np.triu(np.ones(shape=(128, 128)), 1), dtype=self.config.param_dtype
         )
+        self.lowe_triangle_decode_mask = Tensor(
+            np.triu(np.ones(shape=(1, 1)), 1), dtype=self.config.param_dtype
+        )
         self.key_cache = []
         self.value_cache = []
 
@@ -119,19 +122,31 @@ class MindSporeForCausalLM(torch.nn.Module):
             q_seq_lens = np.ones([forward_batch.batch_size], dtype=np.int32)
 
         token_cache_loc, kv_mask = self.prepare_token_cache_loc_with_mask(forward_batch)
+        
+        page_size = forward_batch.token_to_kv_pool.page_size
+        block_tables = tensor_torch2ms((
+                    forward_batch.req_to_token_pool.req_to_token[
+                        forward_batch.req_pool_indices, : forward_batch.seq_lens.max()
+                    ][:, :: page_size]
+                    // page_size
+                )).to(ms.int32)
 
         model_inputs = {}
         model_inputs["input_ids"] = tensor_torch2ms(input_ids).to(ms.int32)
         model_inputs["batch_valid_length"] = ms.Tensor(batch_valid_length, dtype=ms.int32)
         model_inputs["position_ids"] = tensor_torch2ms(positions)
         model_inputs["q_seq_lens"] = ms.Tensor(q_seq_lens, dtype=ms.int32)
-        model_inputs["attention_mask"] = self.lower_triangle_mask
-        model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc)
+        if is_prefill:
+            model_inputs["attention_mask"] = self.lower_triangle_mask
+        else:
+            model_inputs["attention_mask"] = self.lowe_triangle_decode_mask
+        model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc).to(ms.int32)
         model_inputs["token_cache_loc"] = token_cache_loc
         model_inputs["kv_mask"] = kv_mask
         model_inputs["is_prefill"] = is_prefill
         model_inputs["key_cache"] = key_cache
         model_inputs["value_cache"] = value_cache
+        model_inputs["block_tables"] = block_tables
 
         return model_inputs
 
