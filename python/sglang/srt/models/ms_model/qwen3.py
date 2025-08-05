@@ -620,12 +620,12 @@ class Qwen3Attention(nn.Cell):
         self.rope_theta = int(config.rope_theta)
         self.param_dtype = config.param_dtype
         self.max_position = config.max_position_embeddings
-        if config.rope_scaling:
+        if config.rope_scaling is not None:
             self.rope_type = config.rope_scaling["rope_type"]
             self.rope_factor = config.rope_scaling["factor"]
             self.rope_max_position_embeddings = config.rope_scaling["original_max_position_embeddings"]
         else:
-            self.rope_type = None
+            self.rope_type = "default_rope" 
 
         self.attn = MsNativeAttnBackend(config,
                                     config.num_attention_heads // self.tp_size,
