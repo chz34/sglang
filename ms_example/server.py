@@ -13,7 +13,7 @@ server_process, port = launch_server_cmd(
         --device npu \
         --model-impl mindspore \
         --max-total-tokens=20000 \
-        --attention-backend torch_native \
+        --attention-backend ascend \
         --tp-size 1 \
         --dp-size 1",
     port=37654)
