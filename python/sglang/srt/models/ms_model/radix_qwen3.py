@@ -21,9 +21,6 @@ from sglang.srt.distributed import (get_tp_group, get_tensor_model_parallel_worl
 from sglang.srt.layers.dp_attention import get_attention_tp_group
 from sglang.srt.models.ms_model.qwen3 import Qwen3Model, Qwen3Linear, Qwen3ForCausalLM
 
-from mindspore.communication import create_group
-from mindspore._c_expression import GroupOptions
-
 from .utils import tensor_torch2ms, tensor_ms2torch
 
 logger = logging.getLogger(__name__)
@@ -48,8 +45,6 @@ class RadixQwen3Model(torch.nn.Module):
             get_tensor_model_parallel_rank()
         )
 
-        self.reuse_hccl_comm()
-
         self.config = model_config.hf_config
         self.model = Qwen3ForCausalLM(model_config, load_config, prefix)
 
@@ -58,28 +53,6 @@ class RadixQwen3Model(torch.nn.Module):
         )
         self.key_cache = []
         self.value_cache = []
-
-    def reuse_hccl_comm(self):
-        ms.communication.init("hccl")
-        all_groups = self.get_all_groups()
-        for group in all_groups:
-            # Torch ProcessGroupHccl
-            device_group = group.device_group
-            # GroupCoordinator unique_name
-            group_name = group.unique_name
-            local_rank = torch.distributed.get_rank(device_group)
-            hccl_comm_handle = device_group._get_backend(torch.device("npu")).get_hccl_comm(local_rank)
-            print(f"Try to reuse torch group: {device_group}, group_name: {group_name}, local rank: {local_rank},"
-                  f"hccl communicator handle: {hex(hccl_comm_handle)}", flush=True)
-
-            # Create MS communication group by hccl comm handle to reuse Torch group.
-            group_options = GroupOptions()
-            group_options.hccl_config = {"hccl_comm": hccl_comm_handle}
-            create_group(group_name, group.ranks, group_options)
-
-    def get_all_groups(self) -> list[GroupCoordinator]:
-        all_groups = [get_tp_group(), get_attention_tp_group()]
-        return all_groups
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
