@@ -16,9 +16,6 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.distributed import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from sglang.srt.models.ms_model.qwen3 import Qwen3ForCausalLM
 
-from mindspore.communication import create_group
-from mindspore._c_expression import GroupOptions
-
 from sglang.srt.models.ms_model.utils import tensor_torch2ms, tensor_ms2torch
 
 type_model_map = {
@@ -43,20 +40,6 @@ class MindSporeForCausalLM(torch.nn.Module):
             get_tensor_model_parallel_world_size(),
             get_tensor_model_parallel_rank()
         )
-        # ms.set_device("Ascend", get_attention_tp_rank())
-        ms.communication.init("hccl")
-        tp = get_tp_group()
-        tp_group_name = tp.unique_name
-        self.group_name = tp_group_name
-        device_group = tp.device_group
-
-        self.local_rank = torch.distributed.get_rank(device_group)
-        # self.local_rank = test_group.local_rank
-        hccl_comm_handle = device_group._get_backend(torch.device("npu")).get_hccl_comm(self.local_rank)
-        group_options = GroupOptions()
-        group_options.hccl_config = {"hcom": hccl_comm_handle}
-        create_group(tp_group_name, tp.ranks, group_options)
-        logger.info("TP Group created")
 
         model_type = self.config.model_type
         if model_type not in type_model_map:
