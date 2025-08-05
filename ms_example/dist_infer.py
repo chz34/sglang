@@ -11,9 +11,6 @@ parser.add_argument("--model_path", metavar="--model_path", dest="model_path",
 
 args = parser.parse_args()
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_32b_instruct_800l_A2.yaml') 
-
 def main():
     llm = sgl.Engine(model_path=args.model_path,
                      device="npu",
