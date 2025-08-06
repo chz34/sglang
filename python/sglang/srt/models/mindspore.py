@@ -7,8 +7,7 @@ import torch
 # from torch import nn
 
 import mindspore as ms
-from mindspore import nn
-from mindspore import Tensor, mutable
+from mindspore import Tensor, mutable, mint
 
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -23,6 +22,76 @@ type_model_map = {
 }
 
 logger = logging.getLogger(__name__)
+
+MAX_MODEL_LEN_32K = 32 * 1024
+class LowerTriangularMask:
+    r"""
+    Provide Infer model attention mask.
+    Args:
+        dtype (ms dtype): The compute type of Infer model.
+        max_model_len (int): The max model length of Infer model.
+    """
+
+    def __init__(self, dtype, max_model_len):
+        self.dtype = dtype
+        self.max_model_len = max_model_len
+        prefill_mask_coeff = 1.0 if self.dtype == ms.bfloat16 else -10000.0
+
+        self.prefill_mask = Tensor(
+            np.triu(np.ones(shape=(128, 128), dtype=np.float16), k=1) *
+            prefill_mask_coeff,
+            dtype=self.dtype)
+
+        self.hard_mask = mint.zeros((1, 1), dtype=dtype)
+        decode_mask_coeff = -10000
+        self.decode_mask = self.init_decode_mask(decode_mask_coeff)
+
+    def init_decode_mask(self, decode_mask_coeff):
+        # Our previous test limit was 32K, in order not to affect the
+        # original performance. We define 32K as the basic mask to
+        # distinguish tensor and numpy, numpy mask will cause interruption
+        # of stream and performance may not be satisfactory.
+        # Relying on PagedAttention operators to automatically
+        # generate masks to solve the problem.
+        if self.max_model_len > MAX_MODEL_LEN_32K:
+            decode_mask = np.triu(np.ones(
+                shape=(self.max_model_len, self.max_model_len),
+                dtype=np.float16),
+                                  k=1) * decode_mask_coeff
+        else:
+            decode_mask = Tensor(np.triu(np.ones(
+                shape=(self.max_model_len, self.max_model_len), dtype=np.int8),
+                                         k=1),
+                                 dtype=self.dtype) * decode_mask_coeff
+        return decode_mask
+
+    def gen_attention_decode_mask(self, position_ids):
+        if isinstance(self.decode_mask, ms.Tensor):
+            attention_mask = mint.index_select(self.decode_mask, 0,
+                                               position_ids)
+        elif isinstance(self.decode_mask, np.ndarray):
+            attention_mask = self.decode_mask[position_ids.asnumpy()]
+            attention_mask = ms.Tensor(attention_mask, dtype=self.dtype)
+        else:
+            raise ValueError(
+                f"Decode mask type:{type(self.decode_mask)} is not supported.")
+
+        return attention_mask
+
+    def gen_attention_mask(self,
+                           is_prefill,
+                           position_ids,
+                           query_lens):
+        if is_prefill:
+            attention_mask = self.prefill_mask
+        else:
+            if max(query_lens) > 1:
+                attention_mask = self.gen_attention_decode_mask(position_ids)
+            else:
+                attention_mask = self.hard_mask
+        return attention_mask
+
+
 class MindSporeForCausalLM(torch.nn.Module):
     def __init__(self,
                 config: Any,
@@ -53,6 +122,8 @@ class MindSporeForCausalLM(torch.nn.Module):
         self.lowe_triangle_decode_mask = Tensor(
             np.triu(np.ones(shape=(1, 1)), 1), dtype=self.config.param_dtype
         )
+
+        self.casual_mask = LowerTriangularMask(self.config.param_dtype, self.config.max_position_embeddings)
         self.key_cache = []
         self.value_cache = []
 
@@ -98,11 +169,15 @@ class MindSporeForCausalLM(torch.nn.Module):
 
         query_lens_np = forward_batch.seq_lens.cpu().numpy()
         batch_valid_length = forward_batch.seq_lens.cpu().numpy()
+        max_valid_length = int(batch_valid_length.max())
 
         if is_prefill:
             q_seq_lens = query_lens_np
         else:
-            q_seq_lens = np.ones([forward_batch.batch_size], dtype=np.int32)
+            if forward_batch.extend_prefix_lens is not None:
+                q_seq_lens = forward_batch.extend_prefix_lens.cpu().numpy()
+            else:
+                q_seq_lens = np.ones([forward_batch.batch_size], dtype=np.int32)
 
         token_cache_loc, kv_mask = self.prepare_token_cache_loc_with_mask(forward_batch)
         
@@ -122,7 +197,8 @@ class MindSporeForCausalLM(torch.nn.Module):
         if is_prefill:
             model_inputs["attention_mask"] = self.lower_triangle_mask
         else:
-            model_inputs["attention_mask"] = self.lowe_triangle_decode_mask
+            model_inputs["attention_mask"] = self.casual_mask.gen_attention_mask(
+                is_prefill, model_inputs["position_ids"], model_inputs["q_seq_lens"])[:, :max_valid_length].contiguous()
         model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc).to(ms.int32)
         model_inputs["token_cache_loc"] = token_cache_loc
         model_inputs["kv_mask"] = kv_mask
@@ -130,7 +206,6 @@ class MindSporeForCausalLM(torch.nn.Module):
         model_inputs["key_cache"] = key_cache
         model_inputs["value_cache"] = value_cache
         model_inputs["block_tables"] = block_tables
-
         return model_inputs
 
     def construct(self):
