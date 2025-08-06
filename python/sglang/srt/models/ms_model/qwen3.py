@@ -111,7 +111,8 @@ class MsNativeAttnBackend(nn.Cell):
 
     def decode_pa(self, query, batch_valid_length, attn_mask=None, q_seq_lens=None,
                     key_cache=None, value_cache=None, token_cache_loc=None, kv_mask=None, block_tables=None):
-        query = mint.reshape(query, (-1, 1, self.n_heads * self.head_dim))
+        mask_len = attn_mask.shape[0]
+        query = mint.reshape(query, (-1, mask_len, self.n_heads * self.head_dim))
         output = self.paged_attention(query, key_cache, value_cache,
                                       block_tables, batch_valid_length, None,
                                       None, attn_mask, q_seq_lens)
@@ -187,7 +188,7 @@ class VocabParallelEmbedding(nn.Cell):
             dtype=config.param_dtype), requires_grad=False)
 
         # if tp_rank > 0:
-        print(f"zhq tp_rank:{tp_rank}, tensor_parallel_group_size:{self.tensor_parallel_group_size}, self.weight:{self.weight.shape}")
+        logger.info(f"zhq tp_rank:{tp_rank}, tensor_parallel_group_size:{self.tensor_parallel_group_size}, self.weight:{self.weight.shape}")
         tp_group_name = _get_tp_group_name()
         self.all_reduce = ops.AllReduce(group=tp_group_name)
         self.reduce_scatter_tensor = ops.ReduceScatter(group=tp_group_name)
@@ -927,7 +928,7 @@ class Qwen3ForCausalLM(nn.Cell):
                 # Make sure the weight is loaded on device, so the kv cache calculation is correct.
 
     def construct(self, **model_inputs)-> Tensor:
-        batch_valid_length = model_inputs["batch_valid_length"]
+        q_seq_lens = model_inputs["q_seq_lens"]
         is_prefill = model_inputs["is_prefill"]
 
         if self.prev_prefill != is_prefill:
@@ -939,17 +940,17 @@ class Qwen3ForCausalLM(nn.Cell):
         else:
             self.model.phase = "increment"
 
-        pre_gather = is_prefill and batch_valid_length is not None
         start_time = time.time()
         hidden_state = self.model(**model_inputs)
         end_time = time.time()
         logger.info(f"run model time: {end_time - start_time}s")
-        if pre_gather:
-            batch_valid_length = mint.cumsum(batch_valid_length, 0)
-            hidden_state = self.gather(hidden_state, batch_valid_length - 1, 0)
+
+        # TODO: In pure decode scenarios, cumsum and gather operations will be redundant .
+        q_seq_lens = mint.cumsum(q_seq_lens, 0)
+        hidden_state = self.gather(hidden_state, q_seq_lens - 1, 0)
+
         logits = self.lm_head(hidden_state)
         logits = self.all_gather(logits)
         logits = ops.cast(logits, dtype.float32)
         logits = ops.reshape(logits, (-1, logits.shape[-1]))
         return logits
-

@@ -16,7 +16,7 @@ def main():
                      device="npu",
                      model_impl="mindspore",
                      max_total_tokens=20000,
-                     attention_backend="torch_native",
+                     attention_backend="ascend",
                      tp_size=2,
                      dp_size=1)
 
