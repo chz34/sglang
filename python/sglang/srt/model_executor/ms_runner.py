@@ -21,6 +21,7 @@ import torch
 import subprocess
 import sys
 from pathlib import Path
+import multiprocessing as mp
 
 from sglang.srt.distributed.parallel_state import _groups
 import mindspore as ms
@@ -54,37 +55,40 @@ def _get_host_and_ip(distributed_init_method):
 
     return ip, port
 
+def run_scheduler_init(rank, local_rank, world_size, master_addr, master_port):
+    with open(str(Path() / "schedule.log"), "w") as scheduler_f:
+        # For Python outputs.
+        sys.stdout = scheduler_f
+        sys.stderr = scheduler_f
+        # For C++ outputs.
+        os.dup2(scheduler_f.fileno(), 1)
+        os.dup2(scheduler_f.fileno(), 2)
+        os.environ["DEVICE_ID"] = str(local_rank)
+        os.environ["MS_WORKER_NUM"] = str(world_size)
+        os.environ["MS_ROLE"] = "MS_SCHED"
+        os.environ["MS_NODE_ID"] = str(rank)
+        os.environ["MS_SCHED_HOST"] = str(master_addr)
+        os.environ["MS_SCHED_PORT"] = str(master_port)
+        # This function is blocked until the whole cluster exits.
+        ms.communication.init()
+
 def set_ms_parallel_env(rank, local_rank, world_size, init_method):
+    master_addr, master_port = _get_host_and_ip(init_method)
     if not os.getenv("MS_ROLE"):
         # Not call from msrun, should call a subprocess for scheduler.
         if rank == 0:
-            with open(str(Path() / "schedule.log"), "w") as scheduler_f:
-                script = Path(__file__).parent / "scheduler_init.py"
-                sched_p = subprocess.Popen(
-                    [
-                        sys.executable,
-                        str(script),
-                        "--rank_id",
-                        str(rank),
-                        "--rank_size",
-                        str(world_size),
-                        "--distributed_init_method",
-                        str(init_method),
-                    ],
-                    shell=False,
-                    stdout=scheduler_f,
-                    stderr=subprocess.STDOUT,
-                )
-                global _tmp
-                _tmp.set_sched_process(sched_p)
+            sched_p = mp.Process(target=run_scheduler_init,
+                                 args=(rank, local_rank, world_size, master_addr, master_port))
+            sched_p.start()
+            global _tmp
+            _tmp.set_sched_process(sched_p)
 
         os.environ["DEVICE_ID"] = str(local_rank)
         os.environ["MS_WORKER_NUM"] = str(world_size)
         os.environ["MS_ROLE"] = "MS_WORKER"
         os.environ["MS_NODE_ID"] = str(rank)
-        comm_addr, comm_port = _get_host_and_ip(init_method)
-        os.environ["MS_SCHED_HOST"] = str(comm_addr)
-        os.environ["MS_SCHED_PORT"] = str(comm_port)
+        os.environ["MS_SCHED_HOST"] = str(master_addr)
+        os.environ["MS_SCHED_PORT"] = str(master_port)
 
 def reuse_hccl_comm():
     for group_name, group in _groups.items():
