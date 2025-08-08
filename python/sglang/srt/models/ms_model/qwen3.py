@@ -779,7 +779,6 @@ class Qwen3Model(nn.Cell):
 
     # pylint: disable=W0613
     @jit(jit_level="O0", infer_boost="on")
-    # @jit
     def construct(self, input_ids,  position_ids=None, attention_mask=None,
                   batch_valid_length=None, batch_index=None, zactivate_len=None,
                   prefix_keys_values=None, is_prefill=True,

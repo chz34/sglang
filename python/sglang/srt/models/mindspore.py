@@ -1,3 +1,4 @@
+import os
 import logging
 from typing import Any, Iterable, Optional, Tuple, Union
 
@@ -104,6 +105,8 @@ class MindSporeForCausalLM(torch.nn.Module):
         ms.set_context(mode=ms.context.PYNATIVE_MODE)
         ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
 
+        os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = "FlashAttentionScore,PagedAttention"
+
         logger.info(
             "MindSporeForCausalLM tp size %d tp rank %d",
             get_tensor_model_parallel_world_size(),
@@ -167,17 +170,13 @@ class MindSporeForCausalLM(torch.nn.Module):
         is_prefill = forward_batch.forward_mode.is_extend()
         is_prefill = is_prefill and forward_batch.extend_prefix_lens.sum().item() == 0
 
-        query_lens_np = forward_batch.seq_lens.cpu().numpy()
         batch_valid_length = forward_batch.seq_lens.cpu().numpy()
         max_valid_length = int(batch_valid_length.max())
 
-        if is_prefill:
-            q_seq_lens = query_lens_np
+        if forward_batch.extend_seq_lens is not None:
+            q_seq_lens = forward_batch.extend_seq_lens.cpu().numpy()
         else:
-            if forward_batch.extend_prefix_lens is not None:
-                q_seq_lens = forward_batch.extend_prefix_lens.cpu().numpy()
-            else:
-                q_seq_lens = np.ones([forward_batch.batch_size], dtype=np.int32)
+            q_seq_lens = np.ones([forward_batch.batch_size], dtype=np.int32)
 
         token_cache_loc, kv_mask = self.prepare_token_cache_loc_with_mask(forward_batch)
         
@@ -198,7 +197,7 @@ class MindSporeForCausalLM(torch.nn.Module):
             model_inputs["attention_mask"] = self.lower_triangle_mask
         else:
             model_inputs["attention_mask"] = self.casual_mask.gen_attention_mask(
-                is_prefill, model_inputs["position_ids"], model_inputs["q_seq_lens"])[:, :max_valid_length].contiguous()
+                is_prefill, model_inputs["position_ids"], model_inputs["q_seq_lens"]).contiguous()
         model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc).to(ms.int32)
         model_inputs["token_cache_loc"] = token_cache_loc
         model_inputs["kv_mask"] = kv_mask
