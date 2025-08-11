@@ -180,20 +180,19 @@ python -m sglang.bench_one_batch \
     --model-path /path/to/your/model \
     --model-impl mindspore \
     --device npu \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --tp-size 1 \
     --dp-size 1 \
     --batch 8 \
     --input-len 256 \
-    --output-len 32 \
-    --max-total-tokens 80000
+    --output-len 32
 
 # Run throughput benchmark
 python -m sglang.bench_offline_throughput \
     --model-path /path/to/your/model \
     --model-impl mindspore \
     --device npu \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --tp-size 2 \
     --dp-size 1
 ```
@@ -231,11 +230,11 @@ python3 -m sglang.launch_server \
     --host 0.0.0.0 \
     --device npu \
     --model-impl mindspore \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --log-level DEBUG
 ```
 
-Enable mindspore info and debug loggin by setting environments.
+Enable mindspore info and debug logging by setting environments.
 
 ```bash
 export GLOG_v=1  # INFO
