@@ -233,12 +233,14 @@ class ModelRunner:
 
         # Load MindSpore distributed module only when world size is greater than 1.
         from sglang.srt.model_executor.ms_runner import init_ms_distributed
+
         init_ms_distributed(
-                world_size=self.tp_size * self.pp_size,
-                rank=self.tp_size * self.pp_rank + self.tp_rank,
-                local_rank=self.gpu_id,
-                server_args=self.server_args,
-                port=self.dist_port)
+            world_size=self.tp_size * self.pp_size,
+            rank=self.tp_size * self.pp_rank + self.tp_rank,
+            local_rank=self.gpu_id,
+            server_args=self.server_args,
+            port=self.dist_port,
+        )
 
         # Update deep gemm configure
         if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:

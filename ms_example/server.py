@@ -1,10 +1,13 @@
 import os
+
 import requests
-from sglang.utils import launch_server_cmd
-from sglang.utils import wait_for_server, print_highlight
+
+from sglang.utils import launch_server_cmd, print_highlight, wait_for_server
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_7b_instruct_800l_A2.yaml')
+os.environ["MF_MODEL_CONFIG"] = os.path.join(
+    current_dir, "predict_qwen2_5_7b_instruct_800l_A2.yaml"
+)
 
 server_process, port = launch_server_cmd(
     "python3 -m sglang.launch_server \
@@ -16,7 +19,8 @@ server_process, port = launch_server_cmd(
         --attention-backend ascend \
         --tp-size 1 \
         --dp-size 1",
-    port=37654)
+    port=37654,
+)
 
 wait_for_server(f"http://localhost:{port}")
 

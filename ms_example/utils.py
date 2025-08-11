@@ -14,30 +14,84 @@
 
 import argparse
 
-def get_args():
-    '''get mindspore examples args'''
-    parser  = argparse.ArgumentParser("sglang-mindspore offline infer")
 
-    parser.add_argument("--model_path,", metavar="--model_path", dest="model_path", 
-                                required=False, default="/home/ckpt/Qwen3-8B", help="the model path", type=str)
-    parser.add_argument("--device,", metavar="--device", dest="device", 
-                                required=False, default="npu", help="the device to run", type=str)
-    parser.add_argument("--model_impl,", metavar="--model_impl", dest="model_impl", 
-                                required=False, default="mindspore", help="the model implementation class", type=str)
-    parser.add_argument("--max_total_tokens,", metavar="--max_total_tokens", dest="max_total_tokens",
-                                required=False, default=20000, help="the max total tokens", type=int)
-    parser.add_argument("--attention_backend,", metavar="--attention_backend", dest="attention_backend", 
-                                required=False, default="ascend", help="the attention backend", type=str)
-    parser.add_argument("--tp_size,", metavar="--tp_size", dest="tp_size",
-                                required=False, default=1, help="the tp parallel size", type=int)
-    parser.add_argument("--dp_size,", metavar="--dp_size", dest="dp_size",
-                                required=False, default=1, help="the dp parallel size", type=int)
-    parser.add_argument("--log_level,", metavar="--log_level", dest="log_level", 
-                                required=False, default="INFO", help="the log level for sglang", type=str)
-    parser.add_argument("--enable_greedy,", metavar="--enable_greedy", dest="enable_greedy", 
-                                required=False, default=False, help="enable greedy mode", type=bool)
-    
+def get_args():
+    """get mindspore examples args"""
+    parser = argparse.ArgumentParser("sglang-mindspore offline infer")
+
+    parser.add_argument(
+        "--model_path,",
+        metavar="--model_path",
+        dest="model_path",
+        required=False,
+        default="/home/ckpt/Qwen3-8B",
+        help="the model path",
+        type=str,
+    )
+    parser.add_argument(
+        "--device,",
+        metavar="--device",
+        dest="device",
+        required=False,
+        default="npu",
+        help="the device to run",
+        type=str,
+    )
+    parser.add_argument(
+        "--model_impl,",
+        metavar="--model_impl",
+        dest="model_impl",
+        required=False,
+        default="mindspore",
+        help="the model implementation class",
+        type=str,
+    )
+    parser.add_argument(
+        "--max_total_tokens,",
+        metavar="--max_total_tokens",
+        dest="max_total_tokens",
+        required=False,
+        default=20000,
+        help="the max total tokens",
+        type=int,
+    )
+    parser.add_argument(
+        "--attention_backend,",
+        metavar="--attention_backend",
+        dest="attention_backend",
+        required=False,
+        default="ascend",
+        help="the attention backend",
+        type=str,
+    )
+    parser.add_argument(
+        "--tp_size,",
+        metavar="--tp_size",
+        dest="tp_size",
+        required=False,
+        default=1,
+        help="the tp parallel size",
+        type=int,
+    )
+    parser.add_argument(
+        "--dp_size,",
+        metavar="--dp_size",
+        dest="dp_size",
+        required=False,
+        default=1,
+        help="the dp parallel size",
+        type=int,
+    )
+    parser.add_argument(
+        "--log_level,",
+        metavar="--log_level",
+        dest="log_level",
+        required=False,
+        default="INFO",
+        help="the log level for sglang",
+        type=str,
+    )
+
     args = parser.parse_args()
-    
+
     return args
-    
