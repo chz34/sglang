@@ -23,7 +23,10 @@ def main():
          "The future of AI is",
     ]
 
-    sampling_params = {"temperature": 0.01, "top_p": 0.9}
+    if args.enable_greedy:
+        sampling_params = {"temperature": 0.0, "top_k": 1.0}
+    else:
+        sampling_params = {"temperature": 0.01, "top_p": 0.9}
 
     outputs = llm.generate(prompts, sampling_params)
     for prompt, output in zip(prompts, outputs):

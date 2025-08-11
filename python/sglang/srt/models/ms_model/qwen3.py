@@ -186,9 +186,8 @@ class VocabParallelEmbedding(nn.Cell):
         self.weight = Parameter(mint.zeros(
             (self.num_embeddings_per_partition, self.embedding_dim),
             dtype=config.param_dtype), requires_grad=False)
+        setattr(self.weight, "weight_load", self.weight_load)
 
-        # if tp_rank > 0:
-        logger.info(f"zhq tp_rank:{tp_rank}, tensor_parallel_group_size:{self.tensor_parallel_group_size}, self.weight:{self.weight.shape}")
         tp_group_name = _get_tp_group_name()
         self.all_reduce = ops.AllReduce(group=tp_group_name)
         self.reduce_scatter_tensor = ops.ReduceScatter(group=tp_group_name)
@@ -766,8 +765,7 @@ class Qwen3Model(nn.Cell):
         self.hidden_size = config.hidden_size
         self.num_hidden_layers = config.num_hidden_layers
 
-        self.embed_tokens = VocabEmbedding(config=config)
-        # self.embed_tokens = VocabParallelEmbedding(config=config)
+        self.embed_tokens = VocabParallelEmbedding(config=config)
 
         self.layers = nn.CellList()
 
