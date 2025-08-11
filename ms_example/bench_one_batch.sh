@@ -8,4 +8,4 @@ python -m sglang.bench_one_batch \
         --batch 8 \
         --input-len 256 \
         --output-len 32 \
-        --max-total-tokens 80000 
+        --max-total-tokens 80000
