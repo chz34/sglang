@@ -34,6 +34,8 @@ def get_args():
                                 required=False, default=1, help="the dp parallel size", type=int)
     parser.add_argument("--log_level,", metavar="--log_level", dest="log_level", 
                                 required=False, default="INFO", help="the log level for sglang", type=str)
+    parser.add_argument("--enable_greedy,", metavar="--enable_greedy", dest="enable_greedy", 
+                                required=False, default=False, help="enable greedy mode", type=bool)
     
     args = parser.parse_args()
     
