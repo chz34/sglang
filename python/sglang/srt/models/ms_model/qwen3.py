@@ -1,6 +1,5 @@
 import logging
 import math
-import time
 from functools import lru_cache
 from typing import Iterable, Optional, Tuple, Type, Union
 
@@ -9,21 +8,9 @@ import mindspore.common.dtype as mstype
 import mindspore.ops.operations as P
 import numpy as np
 import torch
-from mindspore import (
-    JitConfig,
-    Model,
-    Parameter,
-    Tensor,
-    dtype,
-    jit,
-    mint,
-    mutable,
-    nn,
-    ops,
-)
+from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
 from mindspore.ops.operations.nn_ops import (
     FlashAttentionScore,
-    IncreFlashAttention,
     PagedAttention,
     ReshapeAndCache,
 )
@@ -73,12 +60,6 @@ class MsNativeAttnBackend(nn.Cell):
             scale_value=self.scale_value,
             next_tokens=0,
             input_layout="TH",
-        )
-        self.incre_flash_attention = IncreFlashAttention(
-            num_heads=self.n_heads,
-            input_layout="BSH",
-            scale_value=self.scale_value,
-            num_key_value_heads=self.n_kv_heads,
         )
         self.paged_attention = PagedAttention(
             head_num=self.n_heads,
@@ -136,43 +117,6 @@ class MsNativeAttnBackend(nn.Cell):
         return output
 
     def decode(
-        self,
-        query,
-        batch_valid_length,
-        attn_mask=None,
-        q_seq_lens=None,
-        key_cache=None,
-        value_cache=None,
-        token_cache_loc=None,
-        kv_mask=None,
-        block_tables=None,
-    ):
-        if self.use_pa:
-            return self.decode_pa(
-                query,
-                batch_valid_length,
-                attn_mask,
-                q_seq_lens,
-                key_cache,
-                value_cache,
-                token_cache_loc,
-                kv_mask,
-                block_tables,
-            )
-        else:
-            return self.decode_ifa(
-                query,
-                batch_valid_length,
-                attn_mask,
-                q_seq_lens,
-                key_cache,
-                value_cache,
-                token_cache_loc,
-                kv_mask,
-                block_tables,
-            )
-
-    def decode_pa(
         self,
         query,
         batch_valid_length,
@@ -1124,8 +1068,8 @@ class Qwen3ForCausalLM(nn.Cell):
             key_cache=dyn_key_caches,
             value_cache=dyn_value_caches,
             out_cache_loc=dyn_out_cache_loc,
-            token_cache_loc=dyn_token_cache_loc,
-            kv_mask=dynamic_kv_mask,
+            token_cache_loc=None,
+            kv_mask=None,
             block_tables=dyn_block_tables,
         )
 
@@ -1156,10 +1100,7 @@ class Qwen3ForCausalLM(nn.Cell):
         else:
             self.model.phase = "increment"
 
-        start_time = time.time()
         hidden_state = self.model(**model_inputs)
-        end_time = time.time()
-        logger.info(f"run model time: {end_time - start_time}s")
 
         # TODO: In pure decode scenarios, cumsum and gather operations will be redundant .
         q_seq_lens = mint.cumsum(q_seq_lens, 0)

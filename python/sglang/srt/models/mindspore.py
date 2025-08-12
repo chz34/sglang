@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from typing import Any, Iterable, Optional, Tuple, Union
 
 import mindspore as ms
@@ -140,9 +141,6 @@ class MindSporeForCausalLM(torch.nn.Module):
         arch = type_model_map[model_type]
         self.model = arch(config=config, quant_config=quant_config)
 
-        self.lower_triangle_mask = Tensor(
-            np.triu(np.ones(shape=(128, 128)), 1), dtype=self.config.param_dtype
-        )
         self.lowe_triangle_decode_mask = Tensor(
             np.triu(np.ones(shape=(1, 1)), 1), dtype=self.config.param_dtype
         )
@@ -196,14 +194,13 @@ class MindSporeForCausalLM(torch.nn.Module):
         is_prefill = is_prefill and forward_batch.extend_prefix_lens.sum().item() == 0
 
         batch_valid_length = forward_batch.seq_lens.cpu().numpy()
-        max_valid_length = int(batch_valid_length.max())
 
         if forward_batch.extend_seq_lens is not None:
             q_seq_lens = forward_batch.extend_seq_lens.cpu().numpy()
         else:
             q_seq_lens = np.ones([forward_batch.batch_size], dtype=np.int32)
 
-        token_cache_loc, kv_mask = self.prepare_token_cache_loc_with_mask(forward_batch)
+        # token_cache_loc, kv_mask = self.prepare_token_cache_loc_with_mask(forward_batch)
 
         page_size = forward_batch.token_to_kv_pool.page_size
         block_tables = tensor_torch2ms(
@@ -222,17 +219,14 @@ class MindSporeForCausalLM(torch.nn.Module):
         )
         model_inputs["position_ids"] = tensor_torch2ms(positions)
         model_inputs["q_seq_lens"] = ms.Tensor(q_seq_lens, dtype=ms.int32)
-        if is_prefill:
-            model_inputs["attention_mask"] = self.lower_triangle_mask
-        else:
-            model_inputs["attention_mask"] = self.casual_mask.gen_attention_mask(
-                is_prefill, model_inputs["position_ids"], model_inputs["q_seq_lens"]
-            ).contiguous()
+        model_inputs["attention_mask"] = self.casual_mask.gen_attention_mask(
+            is_prefill, model_inputs["position_ids"], q_seq_lens
+        ).contiguous()
         model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc).to(
             ms.int32
         )
-        model_inputs["token_cache_loc"] = token_cache_loc
-        model_inputs["kv_mask"] = kv_mask
+        model_inputs["token_cache_loc"] = None
+        model_inputs["kv_mask"] = None
         model_inputs["is_prefill"] = is_prefill
         model_inputs["key_cache"] = key_cache
         model_inputs["value_cache"] = value_cache
@@ -249,11 +243,14 @@ class MindSporeForCausalLM(torch.nn.Module):
         forward_batch: ForwardBatch,
     ) -> Tensor:
 
+        start_time = time.time()
         model_inputs = self.prepare_inputs(input_ids, positions, forward_batch)
         logits = self.model(**model_inputs)
         logits_result = LogitsProcessorOutput(
             next_token_logits=torch.Tensor(logits.asnumpy()).to(input_ids.device)
         )
+        end_time = time.time()
+        logger.info(f"run model time: {end_time - start_time}s")
         # TODO: npu tensor ms2torch error to be fix
         # logits_result = LogitsProcessorOutput(next_token_logits=tensor_ms2torch(logits))
         return logits_result
