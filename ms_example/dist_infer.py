@@ -23,7 +23,6 @@ def main():
         model_path=args.model_path,
         device="npu",
         model_impl="mindspore",
-        max_total_tokens=20000,
         attention_backend="ascend",
         tp_size=2,
         dp_size=1,
