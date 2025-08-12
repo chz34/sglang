@@ -42,7 +42,7 @@ llm = sgl.Engine(
     device="npu",                      # Use NPU device
     model_impl="mindspore",            # MindSpore implementation
     max_total_tokens=20000,            # Maximum total tokens
-    attention_backend="torch_native",  # Attention backend
+    attention_backend="ascend",        # Attention backend
     tp_size=1,                         # Tensor parallelism size
     dp_size=1                          # Data parallelism size
 )
@@ -77,7 +77,7 @@ llm = sgl.Engine(
     device="npu",
     model_impl="mindspore",
     max_total_tokens=20000,
-    attention_backend="torch_native",
+    attention_backend="ascend",
     tp_size=2,    # Use 2 NPUs for tensor parallelism
     dp_size=1     # Data parallelism size
 )
@@ -99,7 +99,7 @@ python3 -m sglang.launch_server \
     --host 0.0.0.0 \
     --device npu \
     --model-impl mindspore \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --tp-size 1 \
     --dp-size 1
 ```
@@ -113,7 +113,7 @@ python3 -m sglang.launch_server \
     --host 0.0.0.0 \
     --device npu \
     --model-impl mindspore \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --dist-init-addr 127.0.0.1:29500 \
     --nnodes 2 \
     --node-rank 0 \
@@ -140,7 +140,7 @@ server_process, port = launch_server_cmd(
         --device npu \
         --model-impl mindspore \
         --max-total-tokens=20000 \
-        --attention-backend torch_native \
+        --attention-backend ascend \
         --tp-size 1 \
         --dp-size 1",
     port=37654)
@@ -180,20 +180,19 @@ python -m sglang.bench_one_batch \
     --model-path /path/to/your/model \
     --model-impl mindspore \
     --device npu \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --tp-size 1 \
     --dp-size 1 \
     --batch 8 \
     --input-len 256 \
-    --output-len 32 \
-    --max-total-tokens 80000
+    --output-len 32
 
 # Run throughput benchmark
 python -m sglang.bench_offline_throughput \
     --model-path /path/to/your/model \
     --model-impl mindspore \
     --device npu \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --tp-size 2 \
     --dp-size 1
 ```
@@ -231,11 +230,11 @@ python3 -m sglang.launch_server \
     --host 0.0.0.0 \
     --device npu \
     --model-impl mindspore \
-    --attention-backend torch_native \
+    --attention-backend ascend \
     --log-level DEBUG
 ```
 
-Enable mindspore info and debug loggin by setting environments.
+Enable mindspore info and debug logging by setting environments.
 
 ```bash
 export GLOG_v=1  # INFO

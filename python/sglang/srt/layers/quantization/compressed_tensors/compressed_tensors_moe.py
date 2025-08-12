@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 try:
     import vllm
+
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
