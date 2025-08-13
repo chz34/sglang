@@ -28,16 +28,13 @@ if TYPE_CHECKING:
         CompressedTensorsConfig,
     )
 
+
 try:
     import vllm
 
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
-
-if VLLM_AVAILABLE and not (is_cuda or is_npu or (is_cpu and is_cpu_amx_available)):
-    from vllm import _custom_ops as vllm_ops
-    from vllm._custom_ops import scaled_fp8_quant
 
 logger = logging.getLogger(__name__)
 
