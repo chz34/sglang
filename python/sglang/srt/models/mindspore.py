@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 import logging
 import os
 import time
@@ -105,7 +107,7 @@ class LowerTriangularMask:
                 current_row : current_row + q_len, context_len:seq_len
             ]
             # use masked_fill_ to inplace modify attention_mask
-            right_tensor.masked_fill_(right_tensor.tril() == self.decode_mask_coeff, 0)
+            right_tensor = right_tensor.triu(1)
             current_row += q_len
 
         return attention_mask
@@ -141,8 +143,6 @@ class MindSporeForCausalLM(torch.nn.Module):
         super().__init__()
         self.config = config
 
-        ms.set_context(infer_boost="on", jit_level="O0")
-        ms.set_context(mode=ms.context.PYNATIVE_MODE)
         ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
 
         os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = (
@@ -160,10 +160,6 @@ class MindSporeForCausalLM(torch.nn.Module):
             raise ValueError(f"Unsupported arch {arch}")
         arch = type_model_map[model_type]
         self.model = arch(config=config, quant_config=quant_config)
-
-        self.lowe_triangle_decode_mask = Tensor(
-            np.triu(np.ones(shape=(1, 1)), 1), dtype=self.config.param_dtype
-        )
 
         self.casual_mask = LowerTriangularMask(
             self.config.param_dtype, self.config.max_position_embeddings
@@ -190,23 +186,6 @@ class MindSporeForCausalLM(torch.nn.Module):
 
         return mutable(self.key_cache), mutable(self.value_cache)
 
-    def prepare_token_cache_loc_with_mask(self, forward_batch: ForwardBatch):
-        """prepare the token cache loc and mask"""
-        batch_size = forward_batch.batch_size
-        max_len = forward_batch.seq_lens.max().item()
-        token_cache_loc = torch.zeros([batch_size, max_len], dtype=torch.int32)
-        kv_mask = torch.ones([batch_size, 1, 1, max_len], dtype=torch.bool)
-        for i in range(batch_size):
-            cur_seq_length = forward_batch.seq_lens[i]
-            req_pool_idx = forward_batch.req_pool_indices[i]
-            per_req_tokens = forward_batch.req_to_token_pool.req_to_token[
-                req_pool_idx, :cur_seq_length
-            ]
-            token_cache_loc[i, :cur_seq_length] = per_req_tokens
-            kv_mask[i, 0, 0, :cur_seq_length] = False
-
-        return tensor_torch2ms(token_cache_loc), tensor_torch2ms(kv_mask)
-
     def prepare_inputs(self, input_ids, positions, forward_batch):
         key_cache, value_cache = self.get_kvcache(forward_batch)
 
@@ -219,8 +198,6 @@ class MindSporeForCausalLM(torch.nn.Module):
             q_seq_lens = forward_batch.extend_seq_lens.cpu().numpy()
         else:
             q_seq_lens = np.ones([forward_batch.batch_size], dtype=np.int32)
-
-        # token_cache_loc, kv_mask = self.prepare_token_cache_loc_with_mask(forward_batch)
 
         page_size = forward_batch.token_to_kv_pool.page_size
         block_tables = tensor_torch2ms(
@@ -245,8 +222,6 @@ class MindSporeForCausalLM(torch.nn.Module):
         model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc).to(
             ms.int32
         )
-        model_inputs["token_cache_loc"] = None
-        model_inputs["kv_mask"] = None
         model_inputs["is_prefill"] = is_prefill
         model_inputs["key_cache"] = key_cache
         model_inputs["value_cache"] = value_cache
