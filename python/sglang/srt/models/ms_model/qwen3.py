@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 import logging
 import math
 from functools import lru_cache
@@ -124,8 +126,6 @@ class MsNativeAttnBackend(nn.Cell):
         q_seq_lens=None,
         key_cache=None,
         value_cache=None,
-        token_cache_loc=None,
-        kv_mask=None,
         block_tables=None,
     ):
         mask_len = attn_mask.shape[0]
@@ -141,38 +141,6 @@ class MsNativeAttnBackend(nn.Cell):
             attn_mask,
             q_seq_lens,
         )
-        output = mint.reshape(output, (-1, self.n_heads * self.head_dim))
-        return output
-
-    def decode_ifa(
-        self,
-        query,
-        batch_valid_length,
-        attn_mask=None,
-        q_seq_lens=None,
-        key_cache=None,
-        value_cache=None,
-        token_cache_loc=None,
-        kv_mask=None,
-        block_tables=None,
-    ):
-        # B, S, H
-        bs = batch_valid_length.shape[0]
-        query = mint.reshape(query, (bs, -1, self.n_heads * self.head_dim))
-
-        # key = key_cache[token_cache_loc]
-        # value = value_cache[token_cache_loc]
-        key = ops.gather(key_cache, token_cache_loc, 0)
-        value = ops.gather(value_cache, token_cache_loc, 0)
-
-        # B, S, H
-        key = mint.reshape(key, (bs, -1, self.n_kv_heads * self.head_dim))
-        value = mint.reshape(value, (bs, -1, self.n_kv_heads * self.head_dim))
-
-        output = self.incre_flash_attention(
-            query, [key], [value], None, batch_valid_length
-        )
-
         output = mint.reshape(output, (-1, self.n_heads * self.head_dim))
         return output
 
@@ -762,8 +730,6 @@ class Qwen3Attention(nn.Cell):
         key_cache: Tensor,
         value_cache: Tensor,
         out_cache_loc: Tensor,
-        token_cache_loc: Tensor,
-        kv_mask: Tensor,
         block_tables: Tensor,
     ) -> Tensor:
         token_lens, hidden_dim = hidden_state.shape
@@ -819,8 +785,6 @@ class Qwen3Attention(nn.Cell):
                 q_seq_lens,
                 key_cache,
                 value_cache,
-                token_cache_loc,
-                kv_mask,
                 block_tables,
             )
 
@@ -860,8 +824,6 @@ class Qwen3DecoderLayer(nn.Cell):
         key_cache: Tensor,
         value_cache: Tensor,
         out_cache_loc: Tensor,
-        token_cache_loc: Tensor,
-        kv_mask: Tensor,
         block_tables: Tensor,
     ) -> Tuple[Tensor, Tensor]:
         if residual is None:
@@ -880,8 +842,6 @@ class Qwen3DecoderLayer(nn.Cell):
             key_cache=key_cache,
             value_cache=value_cache,
             out_cache_loc=out_cache_loc,
-            token_cache_loc=token_cache_loc,
-            kv_mask=kv_mask,
             block_tables=block_tables,
         )
         hidden_state, residual = self.post_attention_layernorm(hidden_state, residual)
@@ -918,23 +878,18 @@ class Qwen3Model(nn.Cell):
         )
 
     # pylint: disable=W0613
-    @jit(jit_level="O0", infer_boost="on")
+    @jit
     def construct(
         self,
         input_ids,
         position_ids=None,
         attention_mask=None,
         batch_valid_length=None,
-        batch_index=None,
-        zactivate_len=None,
-        prefix_keys_values=None,
         is_prefill=True,
         q_seq_lens=None,
         key_cache=None,
         value_cache=None,
         out_cache_loc=None,
-        token_cache_loc=None,
-        kv_mask=None,
         block_tables=None,
     ):
         """
@@ -956,8 +911,6 @@ class Qwen3Model(nn.Cell):
                 key_cache=key_cache[i],
                 value_cache=value_cache[i],
                 out_cache_loc=out_cache_loc,
-                token_cache_loc=token_cache_loc,
-                kv_mask=kv_mask,
                 block_tables=block_tables,
             )
 
@@ -989,12 +942,6 @@ class Qwen3ForCausalLM(nn.Cell):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        # ms.set_context(infer_boost="on")
-        # ms.set_context(mode=ms.context.PYNATIVE_MODE)
-        # ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
-        # ms.set_device("Ascend", get_tensor_model_parallel_rank())
-
         self.prev_prefill = False
 
         self.config = config
@@ -1044,7 +991,6 @@ class Qwen3ForCausalLM(nn.Cell):
         dynamic_attention_mask = Tensor(
             shape=[None, None], dtype=self.config.param_dtype
         )
-        dynamic_kv_mask = Tensor(shape=[None, None, None, None], dtype=dtype.bool_)
         dyn_batch_valid_length = Tensor(
             shape=[
                 None,
@@ -1057,7 +1003,6 @@ class Qwen3ForCausalLM(nn.Cell):
             ],
             dtype=dtype.int32,
         )
-        dyn_token_cache_loc = Tensor(shape=[None, None], dtype=dtype.int32)
         dyn_block_tables = Tensor(shape=[None, None], dtype=dtype.int32)
         # dyn_intermediate_tensors = None
         # dyn_inputs_embeds = None
@@ -1071,8 +1016,6 @@ class Qwen3ForCausalLM(nn.Cell):
             key_cache=dyn_key_caches,
             value_cache=dyn_value_caches,
             out_cache_loc=dyn_out_cache_loc,
-            token_cache_loc=None,
-            kv_mask=None,
             block_tables=dyn_block_tables,
         )
 

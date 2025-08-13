@@ -1,6 +1,6 @@
 # MindSpore Model Backend for SGLang
 
-This directory contains the MindSpore implementation of model backends for SGLang, providing an alternative to PyTorch-based backends for inference on Ascend NPUs and other MindSpore-supported hardware.
+This directory contains the MindSpore implementation of model backends for SGLang, providing an alternative to PyTorch-based backends for inference on Ascend NPUs.
 
 ## Overview
 
@@ -125,10 +125,6 @@ python3 -m sglang.launch_server \
 import os
 import requests
 from sglang.utils import launch_server_cmd, wait_for_server, print_highlight
-
-# Set model configuration
-current_dir = os.path.dirname(os.path.abspath(__file__))
-os.environ['MF_MODEL_CONFIG'] = os.path.join(current_dir, 'predict_qwen2_5_7b_instruct_800l_A2.yaml')
 
 # Launch server
 server_process, port = launch_server_cmd(
