@@ -39,11 +39,13 @@ class LowerTriangularMask:
         max_model_len (int): The max model length of Infer model.
     """
 
-    def __init__(self, dtype, max_model_len):
+    def __init__(self, dtype, max_model_len, decode_mask_coeff=-10000.0):
         self.dtype = dtype
         self.max_model_len = max_model_len
-        prefill_mask_coeff = 1.0 if self.dtype == ms.bfloat16 else -10000.0
+        self.cached_mask_len = 8 * 1024
+        self.decode_mask_coeff = decode_mask_coeff
 
+        prefill_mask_coeff = 1.0 if self.dtype == ms.bfloat16 else -10000.0
         self.prefill_mask = Tensor(
             np.triu(np.ones(shape=(128, 128), dtype=np.float16), k=1)
             * prefill_mask_coeff,
@@ -51,63 +53,81 @@ class LowerTriangularMask:
         )
 
         self.hard_mask = mint.zeros((1, 1), dtype=dtype)
-        decode_mask_coeff = -10000
-        self.decode_mask = self.init_decode_mask(decode_mask_coeff)
-
-    def init_decode_mask(self, decode_mask_coeff):
-        # Our previous test limit was 32K, in order not to affect the
-        # original performance. We define 32K as the basic mask to
-        # distinguish tensor and numpy, numpy mask will cause interruption
-        # of stream and performance may not be satisfactory.
-        # Relying on PagedAttention operators to automatically
-        # generate masks to solve the problem.
-        if self.max_model_len > MAX_MODEL_LEN_32K:
-            decode_mask = (
+        self.decode_mask = (
+            Tensor(
                 np.triu(
                     np.ones(
-                        shape=(self.max_model_len, self.max_model_len), dtype=np.float16
+                        shape=(self.cached_mask_len, self.cached_mask_len),
+                        dtype=np.int8,
                     ),
                     k=1,
-                )
-                * decode_mask_coeff
+                ),
+                dtype=self.dtype,
             )
-        else:
-            decode_mask = (
-                Tensor(
-                    np.triu(
-                        np.ones(
-                            shape=(self.max_model_len, self.max_model_len),
-                            dtype=np.int8,
-                        ),
-                        k=1,
-                    ),
-                    dtype=self.dtype,
-                )
-                * decode_mask_coeff
-            )
-        return decode_mask
+            * self.decode_mask_coeff
+        )
 
-    def gen_attention_decode_mask(self, position_ids):
-        if isinstance(self.decode_mask, ms.Tensor):
-            attention_mask = mint.index_select(self.decode_mask, 0, position_ids)
-        elif isinstance(self.decode_mask, np.ndarray):
-            attention_mask = self.decode_mask[position_ids.asnumpy()]
-            attention_mask = ms.Tensor(attention_mask, dtype=self.dtype)
-        else:
-            raise ValueError(
-                f"Decode mask type:{type(self.decode_mask)} is not supported."
+    def create_mask(self, query_lens_np, seq_lens_np):
+        """
+        when query_lens_np = [3], seq_lens_np = [6], decode_mask_coeff = 1
+        init attention mask
+        0 0 0 0 0 0
+        0 0 0 0 0 0
+        0 0 0 0 0 0
+        """
+        max_seq_len = seq_lens_np.max().item()
+        total_q_len = query_lens_np.sum().item()
+        attention_mask = mint.zeros((total_q_len, max_seq_len), dtype=self.dtype)
+
+        req_num = query_lens_np.shape[0]
+        # skip row when q_len = 1, to decrease execute time
+        current_row = np.argmax(query_lens_np != 1).item()
+        for i in range(current_row, req_num):
+            q_len = query_lens_np[i].item()
+            seq_len = seq_lens_np[i].item()
+            context_len = seq_len - q_len
+            """
+            set the right half to 1
+            0 0 0 1 1 1
+            0 0 0 1 1 1
+            0 0 0 1 1 1
+            """
+            attention_mask[current_row : current_row + q_len, context_len:] = (
+                self.decode_mask_coeff
             )
+            """
+            set the lower triangle of the right half to 0
+            0 0 0 0 1 1
+            0 0 0 0 0 1
+            0 0 0 0 0 0
+            """
+            right_tensor = attention_mask[
+                current_row : current_row + q_len, context_len:seq_len
+            ]
+            # use masked_fill_ to inplace modify attention_mask
+            right_tensor.masked_fill_(right_tensor.tril() == self.decode_mask_coeff, 0)
+            current_row += q_len
 
         return attention_mask
 
-    def gen_attention_mask(self, is_prefill, position_ids, query_lens):
+    def gen_attention_mask(
+        self,
+        is_prefill: bool,
+        position_ids: Tensor,
+        query_lens_np: np.ndarray,
+        seq_lens_np: np.ndarray,
+    ):
+        max_query_len = query_lens_np.max()
+        max_seq_len = seq_lens_np.max()
         if is_prefill:
             attention_mask = self.prefill_mask
-        else:
-            if max(query_lens) > 1:
-                attention_mask = self.gen_attention_decode_mask(position_ids)
+        elif max_query_len > 1:
+            if max_seq_len <= self.cached_mask_len:
+                attention_mask = mint.index_select(self.decode_mask, 0, position_ids)
             else:
-                attention_mask = self.hard_mask
+                attention_mask = self.create_mask(query_lens_np, seq_lens_np)
+        else:
+            attention_mask = self.hard_mask
         return attention_mask
 
 
@@ -220,7 +240,7 @@ class MindSporeForCausalLM(torch.nn.Module):
         model_inputs["position_ids"] = tensor_torch2ms(positions)
         model_inputs["q_seq_lens"] = ms.Tensor(q_seq_lens, dtype=ms.int32)
         model_inputs["attention_mask"] = self.casual_mask.gen_attention_mask(
-            is_prefill, model_inputs["position_ids"], q_seq_lens
+            is_prefill, model_inputs["position_ids"], q_seq_lens, batch_valid_length
         ).contiguous()
         model_inputs["out_cache_loc"] = tensor_torch2ms(forward_batch.out_cache_loc).to(
             ms.int32
