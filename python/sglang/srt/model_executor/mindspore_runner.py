@@ -65,8 +65,8 @@ def run_scheduler_init(rank, local_rank, world_size, master_addr, master_port):
 def set_ms_parallel_env(rank, local_rank, world_size, init_method):
     master_addr, master_port = _get_host_and_ip(init_method)
     if not os.getenv("MS_ROLE"):
-        # Not call from msrun, should call a subprocess for scheduler.
         if rank == 0:
+            # Create a subprocess for scheduler of MindSpore, just for internal collaboration, not for collective communication
             sched_p = mp.Process(
                 target=run_scheduler_init,
                 args=(rank, local_rank, world_size, master_addr, master_port),

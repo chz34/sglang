@@ -8,7 +8,8 @@ def tensor_torch2ms(x: torch.Tensor):
     if x is None or not isinstance(x, torch.Tensor):
         return x
 
-    if x.device.type == "cpu":  # TODO: dlpack support CPU
+    if x.device.type == "cpu":
+        # TODO: dlpack support CPU, for now will slow down the weight loading
         if x.dtype == torch.bfloat16:
             return ms.Tensor(
                 x.contiguous().to(torch.float32).numpy(), dtype=ms.bfloat16

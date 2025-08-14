@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 import logging
-import os
-import time
-from typing import Any, Iterable, Optional, Tuple, Union
+from abc import abstractmethod
+from typing import Any, Iterable, Optional, Tuple
 
 import mindspore as ms
 import numpy as np
@@ -18,8 +17,8 @@ from sglang.srt.distributed import (
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.models.ms_model.qwen3 import Qwen3ForCausalLM
-from sglang.srt.models.ms_model.utils import tensor_ms2torch, tensor_torch2ms
+from sglang.srt.models.mindspore_models.qwen3 import Qwen3ForCausalLM
+from sglang.srt.models.mindspore_models.utils import tensor_ms2torch, tensor_torch2ms
 
 # from torch import nn
 
@@ -30,9 +29,8 @@ type_model_map = {
 
 logger = logging.getLogger(__name__)
 
-MAX_MODEL_LEN_32K = 32 * 1024
 
-
+# Adapt from: https://gitee.com/mindspore/vllm-mindspore/blob/master/vllm_mindspore/model_executor/models/attention_mask.py
 class LowerTriangularMask:
     r"""
     Provide Infer model attention mask.
@@ -145,10 +143,6 @@ class MindSporeForCausalLM(torch.nn.Module):
 
         ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
 
-        os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = (
-            "FlashAttentionScore,PagedAttention"
-        )
-
         logger.info(
             "MindSporeForCausalLM tp size %d tp rank %d",
             get_tensor_model_parallel_world_size(),
@@ -178,9 +172,6 @@ class MindSporeForCausalLM(torch.nn.Module):
             k_cache = forward_batch.token_to_kv_pool.get_key_buffer(i)
             v_cache = forward_batch.token_to_kv_pool.get_value_buffer(i)
 
-            # token_seq, num_head, head_dim = k_cache.shape
-            # self.key_cache.append(mint.zeros(list((token_seq, num_head * 1, head_dim)), dtype=ms.bfloat16))
-            # self.value_cache.append(mint.zeros(list((token_seq, num_head * 1, head_dim)), dtype=ms.bfloat16))
             self.key_cache.append(tensor_torch2ms(k_cache))
             self.value_cache.append(tensor_torch2ms(v_cache))
 
@@ -189,6 +180,9 @@ class MindSporeForCausalLM(torch.nn.Module):
     def prepare_inputs(self, input_ids, positions, forward_batch):
         key_cache, value_cache = self.get_kvcache(forward_batch)
 
+        # Different processing for the mindspore attention operator
+        # Without any prefix cache => Use FlashAttentionScore
+        # With cache => Use PagedAttention, no matter the query length is 1 or not
         is_prefill = forward_batch.forward_mode.is_extend()
         is_prefill = is_prefill and forward_batch.extend_prefix_lens.sum().item() == 0
 
@@ -228,26 +222,23 @@ class MindSporeForCausalLM(torch.nn.Module):
         model_inputs["block_tables"] = block_tables
         return model_inputs
 
-    def construct(self):
-        return
-
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> Tensor:
-
-        start_time = time.time()
+        # prepare base inputs
         model_inputs = self.prepare_inputs(input_ids, positions, forward_batch)
+        # prepare model inputs
+        model_inputs = self.model.prepare_inputs(forward_batch, model_inputs)
+
         logits = self.model(**model_inputs)
+
+        # TODO: npu tensor ms2torch error to be fix, remain issues of torch_npu to get tensor from dlpack
         logits_result = LogitsProcessorOutput(
             next_token_logits=torch.Tensor(logits.asnumpy()).to(input_ids.device)
         )
-        end_time = time.time()
-        logger.info(f"run model time: {end_time - start_time}s")
-        # TODO: npu tensor ms2torch error to be fix
-        # logits_result = LogitsProcessorOutput(next_token_logits=tensor_ms2torch(logits))
         return logits_result
 
 
