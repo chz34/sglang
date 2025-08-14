@@ -654,8 +654,7 @@ class ServerArgs:
             "quantization."
             '"layered" loads weights layer by layer so that one can quantize a '
             "layer before loading another to make the peak memory envelope "
-            "smaller."
-            '"mindspore" will load the weights in the mindspore format.',
+            "smaller.",
         )
         parser.add_argument(
             "--model-loader-extra-config",

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 import logging
 import math
+import os
 from functools import lru_cache
 from typing import Iterable, Optional, Tuple, Type, Union
 
@@ -24,8 +25,8 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-
-from .utils import tensor_torch2ms
+from sglang.srt.models.mindspore_models.mindspore_model_base import MindSporeModelBase
+from sglang.srt.models.mindspore_models.utils import tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
@@ -39,24 +40,12 @@ def _get_tp_group_name():
 class MsNativeAttnBackend(nn.Cell):
     """Paged Attention Manager."""
 
-    def __init__(
-        self, config, n_heads, head_dim, n_kv_heads, seq_length=-1, dtype=dtype.bfloat16
-    ):
+    def __init__(self, n_heads, head_dim, n_kv_heads):
         super().__init__()
-        self.config = config
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.n_kv_heads = n_kv_heads
-        self.seq_length = seq_length
-        self.is_first_iteration = True
         self.scale_value = 1 / math.sqrt(self.head_dim)
-        self.key_cache = None
-        self.value_cache = None
-        self.dtype = dtype
-        self.use_gpa = self.n_heads != self.n_kv_heads
-        self.repeat_num = self.n_heads // self.n_kv_heads
-        self.use_pa = True
-
         self.flash_attention = FlashAttentionScore(
             head_num=self.n_heads,
             scale_value=self.scale_value,
@@ -128,8 +117,6 @@ class MsNativeAttnBackend(nn.Cell):
         value_cache=None,
         block_tables=None,
     ):
-        mask_len = attn_mask.shape[0]
-        query = mint.reshape(query, (-1, mask_len, self.n_heads * self.head_dim))
         output = self.paged_attention(
             query,
             key_cache,
@@ -141,28 +128,7 @@ class MsNativeAttnBackend(nn.Cell):
             attn_mask,
             q_seq_lens,
         )
-        output = mint.reshape(output, (-1, self.n_heads * self.head_dim))
         return output
-
-
-class VocabEmbedding(nn.Cell):
-    def __init__(self, config) -> None:
-        super().__init__()
-
-        self.num_embeddings = config.vocab_size
-        self.embedding_dim = config.hidden_size
-
-        self.gather = ops.Gather()
-
-        self.weight = Parameter(
-            mint.zeros(
-                (self.num_embeddings, self.embedding_dim), dtype=config.param_dtype
-            ),
-            requires_grad=False,
-        )
-
-    def construct(self, input: Tensor) -> Tensor:
-        return self.gather(self.weight, input, 0)
 
 
 class VocabParallelEmbedding(nn.Cell):
@@ -172,11 +138,7 @@ class VocabParallelEmbedding(nn.Cell):
         self.embedding_dim = config.hidden_size
         # self.sequence_parallel = config.sequence_parallel
         self.tensor_parallel_group_size = get_tensor_model_parallel_world_size()
-        tp_rank = (
-            get_tensor_model_parallel_rank()
-            if self.tensor_parallel_group_size > 1
-            else 0
-        )
+        tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
 
         (
@@ -348,38 +310,6 @@ class Qwen3RowParallelLinear(nn.Cell):
 
         param.set_data(tensor_torch2ms(weight))
         return None
-
-
-class Qwen3Linear(nn.Cell):
-    def __init__(
-        self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool
-    ) -> None:
-        super().__init__()
-
-        self.param_dtype = param_dtype
-        self.input_size = input_size
-        self.output_size = output_size
-        self.enable_bias = bias
-
-        self.matmul = ops.MatMul(transpose_b=True)
-        self.weight = Parameter(
-            mint.zeros(
-                (self.output_size, self.input_size),
-                dtype=self.param_dtype,
-            ),
-            requires_grad=False,
-        )
-
-        if self.enable_bias:
-            self.bias_add = ops.Add()
-            self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
-
-    def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
-        origin_shape = input.shape
-        x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
-        if self.enable_bias:
-            x = self.bias_add(x, self.bias)
-        return x.view(*origin_shape[:-1], -1)
 
 
 class Qwen3MLP(nn.Cell):
@@ -561,6 +491,7 @@ class InferYaRNScalingRotaryEmbedding(nn.Cell):
         )
 
 
+# Adapt from: https://gitee.com/mindspore/vllm-mindspore/blob/master/vllm_mindspore/model_executor/layers/rotary_embedding.py
 class Qwen3RotaryEmbedding(nn.Cell):
     def __init__(
         self,
@@ -653,12 +584,9 @@ class Qwen3Attention(nn.Cell):
             self.rope_type = "default_rope"
 
         self.attn = MsNativeAttnBackend(
-            config,
             config.num_attention_heads // self.tp_size,
             config.head_dim,
             config.num_key_value_heads // self.tp_size,
-            config.max_position_embeddings,
-            dtype=config.param_dtype,
         )
 
         self.q_proj = Qwen3ColParallelLinear(
@@ -731,16 +659,8 @@ class Qwen3Attention(nn.Cell):
     ) -> Tensor:
         token_lens, hidden_dim = hidden_state.shape
 
-        q = (
-            self.q_proj(hidden_state)
-            .view(-1, self.num_heads // self.tp_size, self.head_dim)
-            .contiguous()
-        )
-        k = (
-            self.k_proj(hidden_state)
-            .view(-1, self.num_kv_heads // self.tp_size, self.head_dim)
-            .contiguous()
-        )
+        q = self.q_proj(hidden_state).view(-1, self.head_dim).contiguous()
+        k = self.k_proj(hidden_state).view(-1, self.head_dim).contiguous()
         v = (
             self.v_proj(hidden_state)
             .view(-1, self.kv_size // self.tp_size)
@@ -931,7 +851,7 @@ class GatherLastDim(nn.Cell):
         return output
 
 
-class Qwen3ForCausalLM(nn.Cell):
+class Qwen3ForCausalLM(MindSporeModelBase):
     def __init__(
         self,
         config: Qwen3Config,
@@ -943,8 +863,7 @@ class Qwen3ForCausalLM(nn.Cell):
 
         self.config = config
         setattr(self.config, "param_dtype", dtype.bfloat16)
-        pynative_model = Qwen3Model(self.config)
-        self.model = pynative_model
+        self.model = Qwen3Model(self.config)
 
         self.lm_head = Qwen3ColParallelLinear(
             input_size=self.config.hidden_size,
@@ -955,12 +874,11 @@ class Qwen3ForCausalLM(nn.Cell):
         self.all_gather = GatherLastDim()
         self.gather = ops.Gather()
 
-        self.lower_triangle_mask = Tensor(
-            np.triu(np.ones(shape=(128, 128), dtype=np.float16), 1),
-            dtype=self.config.param_dtype,
+        # for best performance of MindSpore for Qwen3
+        os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = (
+            "FlashAttentionScore,PagedAttention"
         )
-        self.key_cache = []
-        self.value_cache = []
+        os.environ["MS_DISABLE_INTERNAL_KERNELS_LIST"] = "RmsNorm"
 
     def set_model_inputs(self, is_prefill):
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
