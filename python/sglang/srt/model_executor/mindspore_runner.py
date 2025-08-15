@@ -32,7 +32,7 @@ _tmp = _Tmp()
 
 def _get_host_and_ip(distributed_init_method):
     try:
-        _, ip_str, port_str = distributed_init_method.split(":")
+        ip_str, port_str = distributed_init_method.split(":")[-2:]
         ip = ip_str.split("/")[-1]
         port = int(port_str)
     except Exception as e:
@@ -103,7 +103,8 @@ def reuse_hccl_comm():
 
 def init_ms_distributed(world_size, rank, local_rank, server_args, port):
     if server_args.dist_init_addr:
-        dist_init_method = f"tcp://{server_args.dist_init_addr}"
+        master_addr, master_port = _get_host_and_ip(server_args.dist_init_addr)
+        dist_init_method = f"tcp://{master_addr}:{master_port + 33}"
     else:
         dist_init_method = f"tcp://{server_args.host}:{port + 33}"
     set_ms_parallel_env(rank, local_rank, world_size, dist_init_method)
