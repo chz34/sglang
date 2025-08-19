@@ -102,11 +102,13 @@ def reuse_hccl_comm():
 
 
 def init_ms_distributed(world_size, rank, local_rank, server_args, port):
+    # MindSpore port offset to avoid conflict with PyTorch port. 
+    port_offset = 33
     if server_args.dist_init_addr:
         master_addr, master_port = _get_host_and_ip(server_args.dist_init_addr)
-        dist_init_method = f"tcp://{master_addr}:{master_port + 33}"
+        dist_init_method = f"tcp://{master_addr}:{master_port + port_offset}"
     else:
-        dist_init_method = f"tcp://{server_args.host}:{port + 33}"
+        dist_init_method = f"tcp://{server_args.host}:{port + port_offset}"
     set_ms_parallel_env(rank, local_rank, world_size, dist_init_method)
 
     ms.set_context(infer_boost="on", jit_level="O0")
