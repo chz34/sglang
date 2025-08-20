@@ -12,11 +12,6 @@ import mindspore.ops.operations as P
 import numpy as np
 import torch
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
-from mindspore.ops.operations.nn_ops import (
-    FlashAttentionScore,
-    PagedAttention,
-    ReshapeAndCache,
-)
 
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
@@ -27,536 +22,52 @@ from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.models.mindspore_models.mindspore_model_base import MindSporeModelBase
 from sglang.srt.models.mindspore_models.utils import tensor_torch2ms
+from sglang.srt.models.mindspore_models.utils import _get_tp_group_name
+from sglang.srt.models.mindspore_models.layers import MsNativeAttnBackend
+from sglang.srt.models.mindspore_models.layers import VocabParallelEmbedding
+from sglang.srt.models.mindspore_models.layers import RMSNorm
+from sglang.srt.models.mindspore_models.layers import QKVParallelLinear
+from sglang.srt.models.mindspore_models.layers import ColParallelLinear
+from sglang.srt.models.mindspore_models.layers import MLPColParallelLinear
+from sglang.srt.models.mindspore_models.layers import RowParallelLinear
+from sglang.srt.models.mindspore_models.layers import SwiGLU
+from sglang.srt.models.mindspore_models.layers import YaRNScalingRotaryEmbedding
+from sglang.srt.models.mindspore_models.layers import BaseRotaryEmbedding
+
 
 logger = logging.getLogger(__name__)
 
 Qwen3Config = None
 
 
-def _get_tp_group_name():
-    return get_tp_group().unique_name
-
-
-class MsNativeAttnBackend(nn.Cell):
-    """Paged Attention Manager."""
-
-    def __init__(self, n_heads, head_dim, n_kv_heads):
-        super().__init__()
-        self.n_heads = n_heads
-        self.head_dim = head_dim
-        self.n_kv_heads = n_kv_heads
-        self.scale_value = 1 / math.sqrt(self.head_dim)
-        self.flash_attention = FlashAttentionScore(
-            head_num=self.n_heads,
-            scale_value=self.scale_value,
-            next_tokens=0,
-            input_layout="TH",
-        )
-        self.paged_attention = PagedAttention(
-            head_num=self.n_heads,
-            scale_value=self.scale_value,
-            kv_head_num=self.n_kv_heads,
-        )
-        self.reshape_and_cache = ReshapeAndCache()
-
-    # pylint: disable=W0613
-    def construct(
-        self,
-        key,
-        value,
-        key_cache=None,
-        value_cache=None,
-        out_cache_loc=None,
-        k_scale=None,
-        v_scale=None,
-    ):
-        if k_scale is not None:
-            key = key / k_scale
-        if v_scale is not None:
-            value = value / v_scale
-        cache_out = self.reshape_and_cache(
-            key, value, key_cache, value_cache, out_cache_loc
-        )
-        key = ops.depend(key, cache_out)
-
-        return key
-
-    def extend(
-        self,
-        query,
-        key,
-        value,
-        attn_mask=None,
-        alibi_mask=None,
-        prefix=None,
-        padding_mask=None,
-        q_seq_lens=None,
-        batch_valid_length=None,
-    ):
-        _, _, _, output = self.flash_attention(
-            query,
-            key,
-            value,
-            alibi_mask,
-            None,
-            padding_mask,
-            attn_mask,
-            prefix,
-            q_seq_lens,
-            batch_valid_length,
-        )
-        return output
-
-    def decode(
-        self,
-        query,
-        batch_valid_length,
-        attn_mask=None,
-        q_seq_lens=None,
-        key_cache=None,
-        value_cache=None,
-        block_tables=None,
-    ):
-        output = self.paged_attention(
-            query,
-            key_cache,
-            value_cache,
-            block_tables,
-            batch_valid_length,
-            None,
-            None,
-            attn_mask,
-            q_seq_lens,
-        )
-        return output
-
-
-class VocabParallelEmbedding(nn.Cell):
-    def __init__(self, config) -> None:
-        super().__init__()
-        self.num_embeddings = config.vocab_size
-        self.embedding_dim = config.hidden_size
-        # self.sequence_parallel = config.sequence_parallel
-        self.tensor_parallel_group_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-
-        (
-            self.vocab_start_index,
-            self.vocab_end_index,
-        ) = self._vocab_range_from_global_vocab_size(
-            self.num_embeddings, tp_rank, self.tensor_parallel_group_size
-        )
-        self.num_embeddings_per_partition = (
-            self.vocab_end_index - self.vocab_start_index
-        )
-        self.weight = Parameter(
-            mint.zeros(
-                (self.num_embeddings_per_partition, self.embedding_dim),
-                dtype=config.param_dtype,
-            ),
-            requires_grad=False,
-        )
-
-        # if tp_rank > 0:
-        logger.info(
-            f"zhq tp_rank:{tp_rank}, tensor_parallel_group_size:{self.tensor_parallel_group_size}, self.weight:{self.weight.shape}"
-        )
-        tp_group_name = _get_tp_group_name()
-        self.all_reduce = ops.AllReduce(group=tp_group_name)
-        self.reduce_scatter_tensor = ops.ReduceScatter(group=tp_group_name)
-
-        self.max_index_per_partition = Tensor(
-            self.num_embeddings_per_partition - 1, dtype=mstype.int32
-        )
-        self.expand_dims = ops.ExpandDims()
-        self.gather = ops.Gather()
-
-    def construct(self, x):
-        if self.tensor_parallel_group_size > 1:
-            displaced_x = mint.sub(x, self.vocab_start_index)
-            down_truncated_x = mint.nn.functional.relu(displaced_x)
-            truncated_x = mint.minimum(down_truncated_x, self.max_index_per_partition)
-            input_mask = mint.eq(displaced_x, truncated_x)
-            input_mask = self.expand_dims(input_mask, -1)
-        else:
-            input_mask = None
-            truncated_x = x
-        output_parallel = self.gather(self.weight, truncated_x, 0)
-        if self.tensor_parallel_group_size > 1:
-            output_parallel = mint.mul(output_parallel, input_mask)
-        output = self.all_reduce(output_parallel)
-        return output
-
-    def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
-        tp_rank = get_tensor_model_parallel_rank()
-        copy_dim = 0
-        shard_size = param.shape[copy_dim]
-        start_idx = tp_rank * shard_size
-        weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
-        param.set_data(tensor_torch2ms(weight))
-        return None
-
-    def _vocab_range_from_global_vocab_size(self, global_vocab_size, rank, world_size):
-        if global_vocab_size % world_size != 0:
-            raise ValueError(
-                f"The vocabulary size is {global_vocab_size},"
-                f"which is not divisible by size of tensor parallel({world_size})."
-            )
-        per_partition_vocab_size = divide(global_vocab_size, world_size)
-        index_f = rank * per_partition_vocab_size
-        index_l = index_f + per_partition_vocab_size
-        return index_f, index_l
-
-
-class RMSNorm(nn.Cell):
-    def __init__(self, norm_dim: int, eps: float, param_dtype: Optional[Type]) -> None:
-        super().__init__()
-
-        self.weight = Parameter(mint.ones(norm_dim, dtype=param_dtype))
-        self.rms_norm = ops.RmsNorm(eps)
-
-    def construct(
-        self, x: Tensor, residual: Optional[Tensor] = None
-    ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
-        if residual is not None:
-            x = x + residual
-            residual = x
-        output = self.rms_norm(x, self.weight)[0]
-        if residual is None:
-            return output
-        return output, residual
-
-
-class Qwen3ColParallelLinear(nn.Cell):
-    def __init__(
-        self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool
-    ) -> None:
-        super().__init__()
-
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.param_dtype = param_dtype
-        self.input_size = input_size
-        self.output_size = output_size // self.tp_size
-        self.enable_bias = bias
-
-        self.matmul = ops.MatMul(transpose_b=True)
-        self.weight = Parameter(
-            mint.zeros((self.output_size, self.input_size), dtype=self.param_dtype),
-            requires_grad=False,
-        )
-        setattr(self.weight, "weight_load", self.weight_load)
-
-        if self.enable_bias:
-            self.bias_add = ops.Add()
-            self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
-            setattr(self.bias, "weight_load", self.weight_load)
-
-    def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
-        origin_shape = input.shape
-        x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
-        if self.enable_bias:
-            x = self.bias_add(x, self.bias)
-        return x.view(*origin_shape[:-1], -1)
-
-    def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
-        tp_rank = get_tensor_model_parallel_rank()
-        copy_dim = 0
-        shard_size = param.shape[copy_dim]
-        start_idx = tp_rank * shard_size
-        weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
-
-        param.set_data(tensor_torch2ms(weight))
-        return None
-
-
-class Qwen3RowParallelLinear(nn.Cell):
-    def __init__(
-        self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool
-    ) -> None:
-        super().__init__()
-
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.param_dtype = param_dtype
-        self.input_size = input_size // self.tp_size
-        self.output_size = output_size
-        self.enable_bias = bias
-
-        self.matmul = ops.MatMul(transpose_b=True)
-        self.weight = Parameter(
-            mint.zeros((self.output_size, self.input_size), dtype=self.param_dtype),
-            requires_grad=False,
-        )
-        setattr(self.weight, "weight_load", self.weight_load)
-
-        if self.enable_bias:
-            self.bias_add = ops.Add()
-            self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
-            setattr(self.bias, "weight_load", self.weight_load)
-        tp_group_name = _get_tp_group_name()
-        self.all_reduce = ops.AllReduce(group=tp_group_name)
-
-    def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
-        origin_shape = input.shape
-        x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
-        if self.enable_bias:
-            x = self.bias_add(x, self.bias)
-        x = self.all_reduce(x)
-        return x.view(*origin_shape[:-1], -1)
-
-    def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
-        tp_rank = get_tensor_model_parallel_rank()
-        copy_dim = 1
-        shard_size = param.shape[copy_dim]
-        start_idx = tp_rank * shard_size
-        weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
-
-        param.set_data(tensor_torch2ms(weight))
-        return None
-
-
 class Qwen3MLP(nn.Cell):
     def __init__(self, config) -> None:
         super().__init__(config)
+        
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.param_dtype = config.param_dtype
 
-        self.up_proj = Qwen3ColParallelLinear(
-            input_size=config.hidden_size,
-            output_size=config.intermediate_size,
-            param_dtype=config.param_dtype,
+        self.gate_up_proj = MLPColParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.intermediate_size * 2,
+            param_dtype=self.param_dtype,
             bias=False,
+            output_sizes=[self.intermediate_size] * 2,
         )
-        self.gate_proj = Qwen3ColParallelLinear(
-            input_size=config.hidden_size,
-            output_size=config.intermediate_size,
-            param_dtype=config.param_dtype,
-            bias=False,
-        )
-        self.down_proj = Qwen3RowParallelLinear(
+        self.down_proj = RowParallelLinear(
             input_size=config.intermediate_size,
             output_size=config.hidden_size,
             param_dtype=config.param_dtype,
             bias=False,
         )
-        self.act_fn = ops.silu
+        self.act_fn = SwiGLU()
 
     def construct(self, x: Tensor) -> Tensor:
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
-
-
-def _yarn_get_mscale(scale: float = 1) -> float:
-    if scale <= 1:
-        return 1.0
-    return 0.1 * math.log(scale) + 1.0
-
-
-def _yarn_find_correction_dim(
-    num_rotations: int,
-    dim: int,
-    base: float = 10000,
-    max_position_embeddings: int = 2048,
-) -> float:
-    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (
-        2 * math.log(base)
-    )
-
-
-# Find dim range bounds based on rotations
-def _yarn_find_correction_range(
-    low_rot: int,
-    high_rot: int,
-    dim: int,
-    base: float = 10000,
-    max_position_embeddings: int = 2048,
-) -> Tuple[int, int]:
-    low = math.floor(
-        _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings)
-    )
-    high = math.ceil(
-        _yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings)
-    )
-    return max(low, 0), min(high, dim - 1)  # Clamp values just in case
-
-
-def _yarn_linear_ramp_mask(
-    low: float, high: float, dim: int, dtype: np.dtype
-) -> np.ndarray:
-    if low == high:
-        high += 0.001  # Prevent singularity
-
-    linear_func = (np.arange(dim, dtype=dtype) - low) / (high - low)
-    ramp_func = np.clip(linear_func, 0, 1)
-    return ramp_func
-
-
-class InferYaRNScalingRotaryEmbedding(nn.Cell):
-    def __init__(
-        self,
-        head_size: int,
-        rotary_dim: int,
-        max_position_embeddings: int,
-        base: int,
-        is_neox_style: bool,
-        scaling_factor: float,
-        dtype,
-        *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
-        beta_fast: int = 32,
-        beta_slow: int = 1,
-    ) -> None:
-        self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
-        self.beta_fast = beta_fast
-        self.beta_slow = beta_slow
-        # Get n-d magnitude scaling corrected for interpolation
-        self.mscale = float(_yarn_get_mscale(self.scaling_factor) * attn_factor)
-
-        super().__init__()
-
-        self.rotary_embedding_op = ops.ApplyRotaryPosEmb(2)
-        self.gather = ops.Gather()
-
-        self.head_size = head_size
-        self.rotary_dim = rotary_dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        self.is_neox_style = is_neox_style
-        self.dtype = dtype
-        self.freqs_cos, self.freqs_sin = self._compute_cos_sin_cache()
-
-    def _compute_inv_freq(self, scaling_factor: float) -> Tensor:
-        pos_freqs = self.base ** (
-            np.arange(0, self.rotary_dim, 2, dtype=np.float32) / self.rotary_dim
-        )
-        inv_freq_extrapolation = 1.0 / pos_freqs
-        inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
-
-        low, high = _yarn_find_correction_range(
-            self.beta_fast,
-            self.beta_slow,
-            self.rotary_dim,
-            self.base,
-            self.max_position_embeddings,
-        )
-        # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (
-            1
-            - _yarn_linear_ramp_mask(
-                low,
-                high,
-                self.rotary_dim // 2,
-                dtype=np.float32,  # type: ignore[arg-type]
-            )
-        ) * self.extrapolation_factor
-        inv_freq = (
-            inv_freq_interpolation * (1 - inv_freq_mask)
-            + inv_freq_extrapolation * inv_freq_mask
-        )
-        return inv_freq
-
-    def _compute_cos_sin_cache(self) -> Tuple[Tensor, Tensor]:
-        freqs = self._compute_inv_freq(self.scaling_factor)
-        t = np.arange(self.max_position_embeddings * self.scaling_factor).astype(
-            np.float32
-        )
-        self.freqs = Tensor(freqs.reshape(1, 1, 1, -1), dtype=self.dtype)
-        freqs = np.outer(t, freqs)  # (max_position_embedding, head_dim // 2)
-        emb = np.concatenate((freqs, freqs), axis=-1)
-        freqs_cos = np.cos(emb) * self.mscale  # (seq_len, head_dim)
-        freqs_sin = np.sin(emb) * self.mscale  # (seq_len, head_dim)
-        freqs_cos = Tensor(freqs_cos, dtype=self.dtype)
-        freqs_sin = Tensor(freqs_sin, dtype=self.dtype)
-        return freqs_cos, freqs_sin
-
-    def construct(
-        self,
-        positions: Tensor,
-        query: Tensor,
-        key: Tensor,
-        batch_valid_length: Tensor,
-        is_prefill: bool,
-        offsets: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor]:
-        query = query.contiguous()
-        key = key.contiguous()
-
-        if is_prefill:
-            freqs_cos = self.freqs_cos
-            freqs_sin = self.freqs_sin
-        else:
-            freqs_cos = self.gather(self.freqs_cos, positions.view(-1), 0)
-            freqs_sin = self.gather(self.freqs_sin, positions.view(-1), 0)
-
-        return self.rotary_embedding_op(
-            query, key, freqs_cos, freqs_sin, batch_valid_length
-        )
-
-
-# Adapt from: https://gitee.com/mindspore/vllm-mindspore/blob/master/vllm_mindspore/model_executor/layers/rotary_embedding.py
-class Qwen3RotaryEmbedding(nn.Cell):
-    def __init__(
-        self,
-        head_size: int,
-        rotary_dim: int,
-        max_position_embeddings: int,
-        base: int,
-        dtype: Optional[Type],
-    ) -> None:
-        super().__init__()
-
-        self.head_size = head_size
-        self.rotary_dim = rotary_dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        self.dtype = dtype
-
-        self.rotary_embedding_op = ops.ApplyRotaryPosEmb(2)
-        self.gather = ops.Gather()
-
-        self.freqs_cos, self.freqs_sin = self._compute_cos_sin_cache()
-
-    def _compute_inv_freq(self, base: Union[int, float]) -> Tensor:
-        freqs_base = mint.arange(0, self.rotary_dim, 2).astype(
-            np.float32
-        )  # (head_dim // 2, )
-        freqs = 1.0 / (base ** (freqs_base / self.rotary_dim))  # (head_dim // 2, )
-        return freqs
-
-    def _compute_cos_sin_cache(self) -> Tuple[Tensor, Tensor]:
-        freqs = self._compute_inv_freq(self.base)
-        t = np.arange(0, self.max_position_embeddings, 1).astype(np.float32)
-        freqs = np.outer(t, freqs)  # (max_position_embedding, head_dim // 2)
-        emb = np.concatenate((freqs, freqs), axis=-1)
-        freqs_cos = np.cos(emb)  # (seq_len, head_dim)
-        freqs_sin = np.sin(emb)  # (seq_len, head_dim)
-        freqs_cos = Tensor(freqs_cos, dtype=self.dtype)
-        freqs_sin = Tensor(freqs_sin, dtype=self.dtype)
-        return freqs_cos, freqs_sin
-
-    def construct(
-        self,
-        positions: Tensor,
-        query: Tensor,
-        key: Tensor,
-        batch_valid_length: Tensor,
-        is_prefill: bool,
-        offsets: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor]:
-        query = query.contiguous()
-        key = key.contiguous()
-
-        if is_prefill:
-            freqs_cos = self.freqs_cos
-            freqs_sin = self.freqs_sin
-        else:
-            freqs_cos = self.gather(self.freqs_cos, positions.view(-1), 0)
-            freqs_sin = self.gather(self.freqs_sin, positions.view(-1), 0)
-
-        return self.rotary_embedding_op(
-            query, key, freqs_cos, freqs_sin, batch_valid_length
-        )
+        x = self.gate_up_proj(x)
+        x = self.act_fn(x)
+        x = self.down_proj(x)
+        return x
 
 
 class Qwen3Attention(nn.Cell):
@@ -591,36 +102,26 @@ class Qwen3Attention(nn.Cell):
             config.head_dim,
             config.num_key_value_heads // self.tp_size,
         )
-
-        self.q_proj = Qwen3ColParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.q_size,
-            param_dtype=self.param_dtype,
+        
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=self.hidden_size,
+            head_dim=self.head_dim,
+            total_num_heads=self.num_heads,
+            total_num_kv_heads=self.num_kv_heads,
             bias=config.attention_bias,
+            param_dtype=self.param_dtype
         )
         self.q_norm = RMSNorm(
             norm_dim=config.head_dim,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
         )
-        self.k_proj = Qwen3ColParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.kv_size,
-            param_dtype=self.param_dtype,
-            bias=config.attention_bias,
-        )
         self.k_norm = RMSNorm(
             norm_dim=config.head_dim,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
         )
-        self.v_proj = Qwen3ColParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.kv_size,
-            param_dtype=self.param_dtype,
-            bias=config.attention_bias,
-        )
-        self.o_proj = Qwen3RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             input_size=self.q_size,
             output_size=self.hidden_size,
             param_dtype=self.param_dtype,
@@ -628,7 +129,7 @@ class Qwen3Attention(nn.Cell):
         )
         self.rotary_emb = None
         if self.rope_type == "yarn":
-            self.rotary_emb = InferYaRNScalingRotaryEmbedding(
+            self.rotary_emb = YaRNScalingRotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=self.rope_max_position_embeddings,
@@ -638,7 +139,7 @@ class Qwen3Attention(nn.Cell):
                 dtype=self.param_dtype,
             )
         else:
-            self.rotary_emb = Qwen3RotaryEmbedding(
+            self.rotary_emb = BaseRotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=self.max_position,
@@ -661,14 +162,17 @@ class Qwen3Attention(nn.Cell):
         block_tables: Tensor,
     ) -> Tensor:
         token_lens, hidden_dim = hidden_state.shape
+        
+        qkv = self.qkv_proj(hidden_state)
+        q, k, v = qkv.split([self.q_size // self.tp_size,
+                             self.kv_size // self.tp_size,
+                             self.kv_size // self.tp_size],
+                            dim=-1)
+        
+        q = q.view(-1, self.head_dim).contiguous()
+        k = k.view(-1, self.head_dim).contiguous()
+        v = v.view(-1, self.kv_size // self.tp_size).contiguous()
 
-        q = self.q_proj(hidden_state).view(-1, self.head_dim).contiguous()
-        k = self.k_proj(hidden_state).view(-1, self.head_dim).contiguous()
-        v = (
-            self.v_proj(hidden_state)
-            .view(-1, self.kv_size // self.tp_size)
-            .contiguous()
-        )
 
         q = self.q_norm(q).view(-1, self.q_size // self.tp_size)
         k = self.k_norm(k).view(-1, self.kv_size // self.tp_size)
@@ -682,7 +186,6 @@ class Qwen3Attention(nn.Cell):
         )
 
         k = k.contiguous()
-        v = v.contiguous()
 
         key_out = self.attn(
             k,
@@ -868,7 +371,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
         setattr(self.config, "param_dtype", dtype.bfloat16)
         self.model = Qwen3Model(self.config)
 
-        self.lm_head = Qwen3ColParallelLinear(
+        self.lm_head = ColParallelLinear(
             input_size=self.config.hidden_size,
             output_size=self.config.vocab_size,
             param_dtype=self.config.param_dtype,
@@ -939,17 +442,37 @@ class Qwen3ForCausalLM(MindSporeModelBase):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         param_dict = self.parameters_dict()
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", "gate"),
+            (".gate_up_proj", ".up_proj", "up"),
+        ]
 
         for name, weight in weights:
-            if name in param_dict:
-                param = param_dict[name]
-                if hasattr(param, "weight_load"):
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                if name in param_dict:
+                    param = param_dict[name]
+                    assert hasattr(param, "weight_load")
                     weight_load = getattr(param, "weight_load")
-                    weight_load(param, weight)
+                    weight_load(param, weight, shard_id)
                     param.set_data(param.move_to("Ascend"))
-                else:
-                    param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
-                # Make sure the weight is loaded on device, so the kv cache calculation is correct.
+                    break
+            else:    
+                if name in param_dict:
+                    param = param_dict[name]
+                    if hasattr(param, "weight_load"):
+                        weight_load = getattr(param, "weight_load")
+                        weight_load(param, weight)
+                        param.set_data(param.move_to("Ascend"))
+                    else:
+                        param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
+                    # Make sure the weight is loaded on device, so the kv cache calculation is correct.
 
     def construct(self, **model_inputs) -> Tensor:
         q_seq_lens = model_inputs["q_seq_lens"]
