@@ -151,7 +151,7 @@ class MindSporeForCausalLM(torch.nn.Module):
 
         model_type = self.config.model_type
         if model_type not in type_model_map:
-            raise ValueError(f"Unsupported arch {arch}")
+            raise ValueError(f"Unsupported arch {model_type}")
         arch = type_model_map[model_type]
         self.model = arch(config=config, quant_config=quant_config)
 
