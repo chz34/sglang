@@ -4,7 +4,6 @@ import logging
 from typing import Iterable, Optional, Tuple, Type, Union
 
 import torch
-
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
 
 from sglang.srt.distributed import (
@@ -12,10 +11,15 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.distributed.utils import divide
-from sglang.srt.models.mindspore_models.utils import tensor_torch2ms
-from sglang.srt.models.mindspore_models.utils import _get_tp_group_name
+from sglang.srt.models.mindspore_models.utils import (
+    _get_tp_group_name,
+    format_cast,
+    is_310p,
+    tensor_torch2ms,
+)
 
 logger = logging.getLogger(__name__)
+
 
 class ColParallelLinear(nn.Cell):
     def __init__(
@@ -57,7 +61,7 @@ class ColParallelLinear(nn.Cell):
 
         param.set_data(tensor_torch2ms(weight))
         return None
-    
+
 
 class QKVParallelLinear(ColParallelLinear):
     def __init__(
@@ -75,23 +79,27 @@ class QKVParallelLinear(ColParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         self.total_num_kv_head = total_num_kv_heads
-        
+
         tp_size = get_tensor_model_parallel_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
-        
+
         if tp_size >= self.total_num_kv_head:
-            logger.error(f"current not suport kv_head {self.total_num_kv_head} less than tp_size {tp_size}")
+            logger.error(
+                f"current not support kv_head {self.total_num_kv_head} less than tp_size {tp_size}"
+            )
         else:
             self.num_kv_heads = divide(self.total_num_kv_head, tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
-        output_size = ((self.num_heads + 2 * self.num_kv_heads) * tp_size * self.head_dim)
-        
-        super().__init__(input_size=input_size,
-                         output_size=output_size,
-                         param_dtype=param_dtype,
-                         bias=bias)
-        
+        output_size = (self.num_heads + 2 * self.num_kv_heads) * tp_size * self.head_dim
+
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            param_dtype=param_dtype,
+            bias=bias,
+        )
+
     def get_shard_offset_and_size(self, shard_id: str):
         assert shard_id in ["q", "k", "v"]
         if shard_id == "q":
@@ -104,51 +112,69 @@ class QKVParallelLinear(ColParallelLinear):
             shard_offset = (self.num_heads + self.num_kv_heads) * self.head_dim
             shard_size = self.num_kv_heads * self.head_dim
         return shard_offset, shard_size
-    
-    def weight_load(self, param: Parameter, weight: torch.Tensor, shard_id: Optional[str] = None) -> None:
+
+    def weight_load(
+        self, param: Parameter, weight: torch.Tensor, shard_id: Optional[str] = None
+    ) -> None:
         copy_dim = 0
         tp_rank = get_tensor_model_parallel_rank()
-        
+
         param_data = param.data
         shard_offset, shard_size = self.get_shard_offset_and_size(shard_id=shard_id)
-        
+
         param_data = param_data.narrow(copy_dim, shard_offset, shard_size)
         if shard_id == "q":
             shard_idx = tp_rank
         else:
             shard_idx = tp_rank // self.num_kv_head_replicas
         start_idx = shard_idx * shard_size
-        
+
         weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
         assert param_data.shape == weight.shape
         del param_data
         if param.name.endswith("weight"):
-            self.weight[shard_offset:shard_offset + shard_size, :] = tensor_torch2ms(weight)
+            self.weight[shard_offset : shard_offset + shard_size, :] = tensor_torch2ms(
+                weight
+            )
         if param.name.endswith("bias"):
-            self.bias[shard_offset:shard_offset + shard_size] = tensor_torch2ms(weight)
-            
+            self.bias[shard_offset : shard_offset + shard_size] = tensor_torch2ms(
+                weight
+            )
+
 
 class MLPColParallelLinear(ColParallelLinear):
-    def __init__(self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool, output_sizes: list) -> None:
-        super().__init__(input_size=input_size, output_size=output_size, param_dtype=param_dtype, bias=bias)
-        
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        param_dtype: Optional[Type],
+        bias: bool,
+        output_sizes: list,
+    ) -> None:
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            param_dtype=param_dtype,
+            bias=bias,
+        )
+
         self.output_sizes = output_sizes
-        
+
     def _get_shard_idx(self, shard_id: str) -> int:
         if shard_id == "gate":
             return 0
-        
+
         if shard_id == "up":
             return 1
-        
+
         return -1
-        
+
     def weight_load(self, param: Tensor, weight: torch.Tensor, shard_id: str) -> None:
         shard_idx = self._get_shard_idx(shard_id=shard_id)
         assert shard_idx != -1
-        
+
         copy_dim = 0
-        
+
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
         if copy_dim is not None and shard_idx is not None:
@@ -160,9 +186,9 @@ class MLPColParallelLinear(ColParallelLinear):
             start_idx = tp_rank * shard_size
             weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
             assert param_data.shape == weight.shape
-            param[shard_offset:shard_offset + shard_size, :] = tensor_torch2ms(weight)
-            
-        
+            param[shard_offset : shard_offset + shard_size, :] = tensor_torch2ms(weight)
+
+
 class RowParallelLinear(nn.Cell):
     def __init__(
         self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool

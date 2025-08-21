@@ -5,6 +5,11 @@ import torch
 
 from sglang.srt.distributed import get_tp_group
 
+FORMAT_TYPE = {
+    "nz": 29,  # TODO: need a variable or enum from mindspore to keep consistency
+}
+
+
 def tensor_torch2ms(x: torch.Tensor):
     if x is None or not isinstance(x, torch.Tensor):
         return x
@@ -21,6 +26,13 @@ def tensor_torch2ms(x: torch.Tensor):
     pt_dlpack = torch.utils.dlpack.to_dlpack(x)
     ms_tensor = ms.Tensor.from_dlpack(pt_dlpack)
     return ms_tensor
+
+
+def format_cast(x: ms.Tensor, format: str):
+    if format in FORMAT_TYPE:
+        return ms.ops.format_cast(x, FORMAT_TYPE[format])
+    else:
+        raise ValueError(f"Unknown format {format}")
 
 
 def tensor_ms2torch(x: ms.Tensor):
@@ -42,3 +54,14 @@ def tensor_ms2torch(x: ms.Tensor):
 
 def _get_tp_group_name():
     return get_tp_group().unique_name
+
+
+def get_ascend_soc_version():
+    from mindspore._c_expression import MSContext
+
+    return MSContext.get_instance().get_ascend_soc_version()
+
+
+def is_310p():
+    device = get_ascend_soc_version()
+    return device in ["310p", "ascend310p"]

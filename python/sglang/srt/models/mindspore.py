@@ -18,7 +18,12 @@ from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorO
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.mindspore_models.qwen3 import Qwen3ForCausalLM
-from sglang.srt.models.mindspore_models.utils import tensor_ms2torch, tensor_torch2ms
+from sglang.srt.models.mindspore_models.utils import (
+    format_cast,
+    is_310p,
+    tensor_ms2torch,
+    tensor_torch2ms,
+)
 
 # from torch import nn
 
@@ -172,8 +177,13 @@ class MindSporeForCausalLM(torch.nn.Module):
             k_cache = forward_batch.token_to_kv_pool.get_key_buffer(i)
             v_cache = forward_batch.token_to_kv_pool.get_value_buffer(i)
 
-            self.key_cache.append(tensor_torch2ms(k_cache))
-            self.value_cache.append(tensor_torch2ms(v_cache))
+            if is_310p():
+                # TODO: resahpe (n_kv_heads, head_size) to (n_kv_heads * head_size) to save memory
+                self.key_cache.append(format_cast(tensor_torch2ms(k_cache), "nz"))
+                self.value_cache.append(format_cast(tensor_torch2ms(v_cache), "nz"))
+            else:
+                self.key_cache.append(tensor_torch2ms(k_cache))
+                self.value_cache.append(tensor_torch2ms(v_cache))
 
         return mutable(self.key_cache), mutable(self.value_cache)
 
