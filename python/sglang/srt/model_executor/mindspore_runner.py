@@ -111,6 +111,6 @@ def init_ms_distributed(world_size, rank, local_rank, server_args, port):
     ms.set_context(infer_boost="on", jit_level="O0")
     ms.set_context(mode=ms.context.PYNATIVE_MODE)
     ms.set_device("Ascend", local_rank)
-    ms.communication.init("hccl")
+    # ms.communication.init("hccl")
     # After distributed job is initialized, reuse hccl comms for MindSpore.
-    reuse_hccl_comm()
+    # reuse_hccl_comm()

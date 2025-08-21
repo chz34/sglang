@@ -220,7 +220,7 @@ class RowParallelLinear(nn.Cell):
         x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
         if self.enable_bias:
             x = self.bias_add(x, self.bias)
-        x = self.all_reduce(x)
+        # x = self.all_reduce(x)
         return x.view(*origin_shape[:-1], -1)
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:

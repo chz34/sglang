@@ -355,7 +355,8 @@ class GatherLastDim(nn.Cell):
         self.split = ops.Split(axis=0, output_num=self.world_size)
 
     def construct(self, input: Tensor) -> Tensor:
-        output = self.all_gather(input)
+        # output = self.all_gather(input)
+        output = input
         tensor_list = self.split(output)
         output = ops.cat(tensor_list, axis=-1)
         return output
@@ -407,7 +408,8 @@ class Qwen3ForCausalLM(MindSporeModelBase):
 
         head_size = self.config.head_dim
         # use pa, if use ifa, the shape should (None, None, head_size)
-        kv_cache_shape = (None, None, None, head_size)
+        num_kv_heads = self.config.num_key_value_heads
+        kv_cache_shape = (None, None, num_kv_heads * head_size)
 
         kv_cache_dtype = self.config.param_dtype
 

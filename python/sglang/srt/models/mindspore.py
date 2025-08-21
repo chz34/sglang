@@ -179,8 +179,21 @@ class MindSporeForCausalLM(torch.nn.Module):
 
             if is_310p():
                 # TODO: resahpe (n_kv_heads, head_size) to (n_kv_heads * head_size) to save memory
-                self.key_cache.append(format_cast(tensor_torch2ms(k_cache), "nz"))
-                self.value_cache.append(format_cast(tensor_torch2ms(v_cache), "nz"))
+                cache_shape = k_cache.shape
+                n_block, block_size, n_kv_heads, head_size = cache_shape
+                cache_shape = (n_block, block_size, n_kv_heads * head_size)
+                self.key_cache.append(
+                    format_cast(
+                        mint.zeros(cache_shape, dtype=self.config.param_dtype), "nz"
+                    )
+                )
+                self.value_cache.append(
+                    format_cast(
+                        mint.zeros(cache_shape, dtype=self.config.param_dtype), "nz"
+                    )
+                )
+                # self.key_cache.append(format_cast(tensor_torch2ms(k_cache), "nz"))
+                # self.value_cache.append(format_cast(tensor_torch2ms(v_cache), "nz"))
             else:
                 self.key_cache.append(tensor_torch2ms(k_cache))
                 self.value_cache.append(tensor_torch2ms(v_cache))

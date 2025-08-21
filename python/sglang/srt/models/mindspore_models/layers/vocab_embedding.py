@@ -3,22 +3,21 @@
 from typing import Any, Iterable, Optional, Tuple
 
 import torch
-
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
 
-from sglang.srt.distributed.utils import divide
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
-from sglang.srt.models.mindspore_models.utils import tensor_torch2ms
-from sglang.srt.models.mindspore_models.utils import _get_tp_group_name
+from sglang.srt.distributed.utils import divide
+from sglang.srt.models.mindspore_models.utils import _get_tp_group_name, tensor_torch2ms
+
 
 class VocabParallelEmbedding(nn.Cell):
     def __init__(self, config: Any) -> None:
         super().__init__()
-        
+
         self.num_embeddings = config.vocab_size
         self.embedding_dim = config.hidden_size
         self.tensor_parallel_group_size = get_tensor_model_parallel_world_size()
@@ -66,7 +65,8 @@ class VocabParallelEmbedding(nn.Cell):
         output_parallel = self.gather(self.weight, truncated_x, 0)
         if self.tensor_parallel_group_size > 1:
             output_parallel = mint.mul(output_parallel, input_mask)
-        output = self.all_reduce(output_parallel)
+        # output = self.all_reduce(output_parallel)
+        output = output_parallel
         return output
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
