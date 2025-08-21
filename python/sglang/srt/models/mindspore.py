@@ -80,10 +80,13 @@ class LowerTriangularMask:
         attention_mask = mint.zeros((total_q_len, max_seq_len), dtype=self.dtype)
 
         req_num = query_lens_np.shape[0]
-        # skip row when q_len = 1, to decrease execute time
-        current_row = np.argmax(query_lens_np != 1).item()
-        for i in range(current_row, req_num):
+        current_row = 0
+        for i in range(req_num):
             q_len = query_lens_np[i].item()
+            current_row += q_len
+            # skip row when q_len <= 1, to decrease execute time
+            if q_len <= 1:
+                continue
             seq_len = seq_lens_np[i].item()
             context_len = seq_len - q_len
             """
@@ -92,21 +95,20 @@ class LowerTriangularMask:
             0 0 0 1 1 1
             0 0 0 1 1 1
             """
-            attention_mask[current_row : current_row + q_len, context_len:] = (
-                self.decode_mask_coeff
-            )
+            attention_mask[current_row - q_len:current_row,
+			               context_len:] = self.decode_mask_coeff
             """
             set the lower triangle of the right half to 0
             0 0 0 0 1 1
             0 0 0 0 0 1
             0 0 0 0 0 0
             """
-            right_tensor = attention_mask[
-                current_row : current_row + q_len, context_len:seq_len
-            ]
+            right_tensor = attention_mask[current_row - q_len:current_row,
+                                          context_len:seq_len]
+
             # use masked_fill_ to inplace modify attention_mask
-            right_tensor = right_tensor.triu(1)
-            current_row += q_len
+            right_tensor.masked_fill_(
+                right_tensor.tril() == self.decode_mask_coeff, 0)
 
         return attention_mask
 
