@@ -45,6 +45,7 @@ class ColParallelLinear(nn.Cell):
             self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
             setattr(self.bias, "weight_load", self.weight_load)
 
+    @jit
     def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
         origin_shape = input.shape
         x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)

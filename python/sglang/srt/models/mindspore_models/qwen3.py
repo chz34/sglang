@@ -374,8 +374,11 @@ class Qwen3ForCausalLM(MindSporeModelBase):
         self.config = config
 
         param_dtype = dtype.bfloat16
-        if hasattr(dtype, str(self.config.torch_dtype)):
-            param_dtype = getattr(dtype, str(self.config.torch_dtype))
+        torch_dtype = self.config.torch_dtype
+        if not isinstance(torch_dtype, str):
+            torch_dtype = str(torch_dtype).split(".")[-1]
+        if hasattr(dtype, torch_dtype):
+            param_dtype = getattr(dtype, torch_dtype)
         if param_dtype == ms.bfloat16 and is_310p():
             param_dtype = ms.float16
             logger.warning(
