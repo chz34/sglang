@@ -18,6 +18,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorO
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.mindspore_models.qwen3 import Qwen3ForCausalLM
+from sglang.srt.models.mindspore_models.qwen3_moe import Qwen3MoeForCausalLM
 from sglang.srt.models.mindspore_models.utils import tensor_ms2torch, tensor_torch2ms
 
 # from torch import nn
@@ -25,6 +26,7 @@ from sglang.srt.models.mindspore_models.utils import tensor_ms2torch, tensor_tor
 
 type_model_map = {
     "qwen3": Qwen3ForCausalLM,
+    "qwen3_moe": Qwen3MoeForCausalLM,
 }
 
 logger = logging.getLogger(__name__)

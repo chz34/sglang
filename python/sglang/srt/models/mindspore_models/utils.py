@@ -3,7 +3,8 @@
 import mindspore as ms
 import torch
 
-from sglang.srt.distributed import get_tp_group
+from sglang.srt.distributed import get_tp_group, get_world_group
+
 
 def tensor_torch2ms(x: torch.Tensor):
     if x is None or not isinstance(x, torch.Tensor):
@@ -40,5 +41,26 @@ def tensor_ms2torch(x: ms.Tensor):
     return torch_tensor
 
 
+def split_loaded_weight(loaded_weight, shard_dim, start_idx, shard_size):
+    if shard_dim is None:
+        loaded_weight = loaded_weight[:]
+        return loaded_weight
+
+    end_idx = start_idx + shard_size
+    if shard_dim == 0:
+        loaded_weight = loaded_weight[start_idx:end_idx]
+    elif shard_dim == 1:
+        loaded_weight = loaded_weight[:, start_idx:end_idx]
+    elif shard_dim == 2:
+        loaded_weight = loaded_weight[:, :, start_idx:end_idx]
+    else:
+        raise ValueError("shard_dim:{} is not supported.".format(shard_dim))
+    return loaded_weight
+
+
 def _get_tp_group_name():
     return get_tp_group().unique_name
+
+
+def _get_world_group_name():
+    return get_world_group().unique_name
