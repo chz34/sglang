@@ -37,7 +37,6 @@ class ColParallelLinear(nn.Cell):
         setattr(self.weight, "weight_load", self.weight_load)
 
         if self.enable_bias:
-            self.bias_add = ops.Add()
             self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
             setattr(self.bias, "weight_load", self.weight_load)
 
@@ -45,7 +44,7 @@ class ColParallelLinear(nn.Cell):
         origin_shape = input.shape
         x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
         if self.enable_bias:
-            x = self.bias_add(x, self.bias)
+            x = mint.add(x, self.bias)
         return x.view(*origin_shape[:-1], -1)
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
@@ -205,7 +204,6 @@ class RowParallelLinear(nn.Cell):
         setattr(self.weight, "weight_load", self.weight_load)
 
         if self.enable_bias:
-            self.bias_add = ops.Add()
             self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
             setattr(self.bias, "weight_load", self.weight_load)
         tp_group_name = _get_tp_group_name()
@@ -215,7 +213,7 @@ class RowParallelLinear(nn.Cell):
         origin_shape = input.shape
         x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
         if self.enable_bias:
-            x = self.bias_add(x, self.bias)
+            x = mint.add(x, self.bias)
         x = self.all_reduce(x)
         return x.view(*origin_shape[:-1], -1)
 
@@ -260,7 +258,6 @@ class MoeReplicatedLinear(nn.Cell):
         setattr(self.weight, "weigth_load", self.weight_load)
 
         if self.enable_bias:
-            self.bias_add = ops.Add()
             self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
             setattr(self.bias, "weight_load", self.weight_load)
 
@@ -268,7 +265,7 @@ class MoeReplicatedLinear(nn.Cell):
         origin_shape = input.shape
         x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
         if self.enable_bias:
-            x = self.bias_add(x, self.bias)
+            x = mint.add(x, self.bias)
         return x.view(*origin_shape[:-1], -1)
 
     def weight_load(self, param: Parameter, weight: torch.Tensor):

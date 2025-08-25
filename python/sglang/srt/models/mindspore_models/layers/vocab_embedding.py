@@ -51,7 +51,6 @@ class VocabParallelEmbedding(nn.Cell):
             self.num_embeddings_per_partition - 1, dtype=dtype.int32
         )
         self.expand_dims = ops.ExpandDims()
-        self.gather = ops.Gather()
 
     def construct(self, x: Tensor) -> Tensor:
         if self.tensor_parallel_group_size > 1:
@@ -63,7 +62,7 @@ class VocabParallelEmbedding(nn.Cell):
         else:
             input_mask = None
             truncated_x = x
-        output_parallel = self.gather(self.weight, truncated_x, 0)
+        output_parallel = mint.index_select(self.weight, 0, truncated_x)
         if self.tensor_parallel_group_size > 1:
             output_parallel = mint.mul(output_parallel, input_mask)
         output = self.all_reduce(output_parallel)

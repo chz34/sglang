@@ -79,8 +79,6 @@ class YaRNScalingRotaryEmbedding(nn.Cell):
         super().__init__()
 
         self.rotary_embedding_op = ops.ApplyRotaryPosEmb(2)
-        self.gather = ops.Gather()
-
         self.head_size = head_size
         self.rotary_dim = rotary_dim
         self.max_position_embeddings = max_position_embeddings
@@ -149,8 +147,8 @@ class YaRNScalingRotaryEmbedding(nn.Cell):
             freqs_cos = self.freqs_cos
             freqs_sin = self.freqs_sin
         else:
-            freqs_cos = self.gather(self.freqs_cos, positions.view(-1), 0)
-            freqs_sin = self.gather(self.freqs_sin, positions.view(-1), 0)
+            freqs_cos = mint.index_select(self.freqs_cos, 0, positions.view(-1))
+            freqs_sin = mint.index_select(self.freqs_sin, 0, positions.view(-1))
 
         return self.rotary_embedding_op(
             query, key, freqs_cos, freqs_sin, batch_valid_length
@@ -176,7 +174,6 @@ class BaseRotaryEmbedding(nn.Cell):
         self.dtype = dtype
 
         self.rotary_embedding_op = ops.ApplyRotaryPosEmb(2)
-        self.gather = ops.Gather()
 
         self.freqs_cos, self.freqs_sin = self._compute_cos_sin_cache()
 
@@ -214,8 +211,8 @@ class BaseRotaryEmbedding(nn.Cell):
             freqs_cos = self.freqs_cos
             freqs_sin = self.freqs_sin
         else:
-            freqs_cos = self.gather(self.freqs_cos, positions.view(-1), 0)
-            freqs_sin = self.gather(self.freqs_sin, positions.view(-1), 0)
+            freqs_cos = mint.index_select(self.freqs_cos, 0, positions.view(-1))
+            freqs_sin = mint.index_select(self.freqs_sin, 0, positions.view(-1))
 
         return self.rotary_embedding_op(
             query, key, freqs_cos, freqs_sin, batch_valid_length

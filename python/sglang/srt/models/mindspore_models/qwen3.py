@@ -353,7 +353,7 @@ class GatherLastDim(nn.Cell):
     def construct(self, input: Tensor) -> Tensor:
         output = self.all_gather(input)
         tensor_list = self.split(output)
-        output = ops.cat(tensor_list, axis=-1)
+        output = mint.cat(tensor_list, dim=-1)
         return output
 
 
@@ -378,7 +378,6 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             bias=False,
         )
         self.all_gather = GatherLastDim()
-        self.gather = ops.Gather()
 
         # for best performance of MindSpore for Qwen3
         os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = (
@@ -491,10 +490,10 @@ class Qwen3ForCausalLM(MindSporeModelBase):
 
         # TODO: In pure decode scenarios, cumsum and gather operations will be redundant .
         q_seq_lens = mint.cumsum(q_seq_lens, 0)
-        hidden_state = self.gather(hidden_state, q_seq_lens - 1, 0)
+        hidden_state = mint.index_select(hidden_state, 0, q_seq_lens - 1)
 
         logits = self.lm_head(hidden_state)
         logits = self.all_gather(logits)
-        logits = ops.cast(logits, dtype.float32)
-        logits = ops.reshape(logits, (-1, logits.shape[-1]))
+        logits = ops.cast(logits, dtype.float32) # 缺少mint.cast
+        logits = mint.reshape(logits, (-1, logits.shape[-1]))
         return logits
