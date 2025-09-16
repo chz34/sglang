@@ -15,6 +15,8 @@ from mindspore.ops.operations.nn_ops import (
     PagedAttention,
     ReshapeAndCache,
 )
+from mindspore_models.mindspore_model_base import MindSporeModelBase
+from mindspore_models.utils import tensor_torch2ms
 
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
@@ -23,8 +25,6 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.models.mindspore_models.mindspore_model_base import MindSporeModelBase
-from sglang.srt.models.mindspore_models.utils import tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +311,7 @@ class Qwen3RowParallelLinear(nn.Cell):
 
 class Qwen3MLP(nn.Cell):
     def __init__(self, config) -> None:
-        super().__init__(config)
+        super().__init__()
 
         self.up_proj = Qwen3ColParallelLinear(
             input_size=config.hidden_size,

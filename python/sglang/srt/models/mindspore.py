@@ -8,6 +8,8 @@ import mindspore as ms
 import numpy as np
 import torch
 from mindspore import Tensor, mint, mutable
+from mindspore_models.qwen3 import Qwen3ForCausalLM
+from mindspore_models.utils import tensor_ms2torch, tensor_torch2ms
 
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
@@ -17,15 +19,40 @@ from sglang.srt.distributed import (
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.models.mindspore_models.qwen3 import Qwen3ForCausalLM
-from sglang.srt.models.mindspore_models.utils import tensor_ms2torch, tensor_torch2ms
-
-# from torch import nn
 
 
-type_model_map = {
-    "qwen3": Qwen3ForCausalLM,
-}
+@lru_cache()
+def import_mindspore_model_classes(path: str = None):
+    model_arch_name_to_cls = {}
+    package_name = "mindspore_models"
+    package = importlib.import_module(package_name)
+    if path is None:
+        path = package.__path__
+    for _, name, ispkg in pkgutil.iter_modules(path, package_name + "."):
+        if not ispkg:
+            try:
+                module = importlib.import_module(name)
+            except Exception as e:
+                logger.warning(f"Ignore import error when loading {name}: {e}")
+                continue
+            if hasattr(module, "EntryClass"):
+                entry = module.EntryClass
+                if isinstance(
+                    entry, list
+                ):  # To support multiple model classes in one module
+                    for tmp in entry:
+                        assert (
+                            tmp.__name__ not in model_arch_name_to_cls
+                        ), f"Duplicated model implementation for {tmp.__name__}"
+                        model_arch_name_to_cls[tmp.__name__] = tmp
+                else:
+                    assert (
+                        entry.__name__ not in model_arch_name_to_cls
+                    ), f"Duplicated model implementation for {entry.__name__}"
+                    model_arch_name_to_cls[entry.__name__] = entry
+
+    return model_arch_name_to_cls
+
 
 logger = logging.getLogger(__name__)
 
@@ -148,11 +175,7 @@ class MindSporeForCausalLM(torch.nn.Module):
             get_tensor_model_parallel_world_size(),
             get_tensor_model_parallel_rank(),
         )
-
-        model_type = self.config.model_type
-        if model_type not in type_model_map:
-            raise ValueError(f"Unsupported arch {model_type}")
-        arch = type_model_map[model_type]
+        arch = self.get_arch()
         self.model = arch(config=config, quant_config=quant_config)
 
         self.casual_mask = LowerTriangularMask(
@@ -160,6 +183,23 @@ class MindSporeForCausalLM(torch.nn.Module):
         )
         self.key_cache = []
         self.value_cache = []
+
+    def get_arch(self):
+        # Get all implemented models
+        name_cls_map = import_mindspore_model_classes()
+
+        # Get arch from config
+        architectures = self.config.architectures
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        for arch in architectures:
+            if arch in name_cls_map:
+                return name_cls_map[arch]
+        if arch is None:
+            raise ValueError(f"Unsupported arch {architectures}")
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
