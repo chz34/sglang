@@ -20,20 +20,20 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.models.mindspore_models.layers import (
+    BaseRotaryEmbedding,
+    ColParallelLinear,
+    MLPColParallelLinear,
+    MsNativeAttnBackend,
+    QKVParallelLinear,
+    RMSNorm,
+    RowParallelLinear,
+    SwiGLU,
+    VocabParallelEmbedding,
+    YaRNScalingRotaryEmbedding,
+)
 from sglang.srt.models.mindspore_models.mindspore_model_base import MindSporeModelBase
-from sglang.srt.models.mindspore_models.utils import tensor_torch2ms
-from sglang.srt.models.mindspore_models.utils import _get_tp_group_name
-from sglang.srt.models.mindspore_models.layers import MsNativeAttnBackend
-from sglang.srt.models.mindspore_models.layers import VocabParallelEmbedding
-from sglang.srt.models.mindspore_models.layers import RMSNorm
-from sglang.srt.models.mindspore_models.layers import QKVParallelLinear
-from sglang.srt.models.mindspore_models.layers import ColParallelLinear
-from sglang.srt.models.mindspore_models.layers import MLPColParallelLinear
-from sglang.srt.models.mindspore_models.layers import RowParallelLinear
-from sglang.srt.models.mindspore_models.layers import SwiGLU
-from sglang.srt.models.mindspore_models.layers import YaRNScalingRotaryEmbedding
-from sglang.srt.models.mindspore_models.layers import BaseRotaryEmbedding
-
+from sglang.srt.models.mindspore_models.utils import _get_tp_group_name, tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +41,11 @@ Qwen3Config = None
 
 
 class Qwen3MLP(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None
+    ) -> None:
         super().__init__(config)
-        
+
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.param_dtype = config.param_dtype
@@ -59,6 +61,7 @@ class Qwen3MLP(nn.Cell):
             input_size=config.intermediate_size,
             output_size=config.hidden_size,
             param_dtype=config.param_dtype,
+            quant_config=quant_config,
             bias=False,
         )
         self.act_fn = SwiGLU()
@@ -102,14 +105,14 @@ class Qwen3Attention(nn.Cell):
             config.head_dim,
             config.num_key_value_heads // self.tp_size,
         )
-        
+
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_dim=self.head_dim,
             total_num_heads=self.num_heads,
             total_num_kv_heads=self.num_kv_heads,
             bias=config.attention_bias,
-            param_dtype=self.param_dtype
+            param_dtype=self.param_dtype,
         )
         self.q_norm = RMSNorm(
             norm_dim=config.head_dim,
@@ -162,17 +165,20 @@ class Qwen3Attention(nn.Cell):
         block_tables: Tensor,
     ) -> Tensor:
         token_lens, hidden_dim = hidden_state.shape
-        
+
         qkv = self.qkv_proj(hidden_state)
-        q, k, v = qkv.split([self.q_size // self.tp_size,
-                             self.kv_size // self.tp_size,
-                             self.kv_size // self.tp_size],
-                            dim=-1)
-        
+        q, k, v = qkv.split(
+            [
+                self.q_size // self.tp_size,
+                self.kv_size // self.tp_size,
+                self.kv_size // self.tp_size,
+            ],
+            dim=-1,
+        )
+
         q = q.view(-1, self.head_dim).contiguous()
         k = k.view(-1, self.head_dim).contiguous()
         v = v.view(-1, self.kv_size // self.tp_size).contiguous()
-
 
         q = self.q_norm(q).view(-1, self.q_size // self.tp_size)
         k = self.k_norm(k).view(-1, self.kv_size // self.tp_size)
@@ -216,13 +222,15 @@ class Qwen3Attention(nn.Cell):
 
 
 class Qwen3DecoderLayer(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None
+    ) -> None:
         super().__init__()
 
         self.hidden_size = config.hidden_size
 
         self.self_attn = Qwen3Attention(config=config)
-        self.mlp = Qwen3MLP(config=config)
+        self.mlp = Qwen3MLP(config=config, quant_config=quant_config)
         self.input_layernorm = RMSNorm(
             norm_dim=config.hidden_size,
             eps=config.rms_norm_eps,
@@ -278,7 +286,7 @@ class Qwen3Model(nn.Cell):
     qwen3 model
     """
 
-    def __init__(self, config):
+    def __init__(self, config, quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
 
@@ -291,7 +299,7 @@ class Qwen3Model(nn.Cell):
         self.layers = nn.CellList()
 
         for i in range(self.num_hidden_layers):
-            layer = Qwen3DecoderLayer(config=config)
+            layer = Qwen3DecoderLayer(config=config, quant_config=quant_config)
             self.layers.append(layer)
 
         self.norm = RMSNorm(
@@ -369,7 +377,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
 
         self.config = config
         setattr(self.config, "param_dtype", dtype.bfloat16)
-        self.model = Qwen3Model(self.config)
+        self.model = Qwen3Model(self.config, quant_config)
 
         self.lm_head = ColParallelLinear(
             input_size=self.config.hidden_size,
@@ -462,7 +470,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
                     weight_load(param, weight, shard_id)
                     param.set_data(param.move_to("Ascend"))
                     break
-            else:    
+            else:
                 if name in param_dict:
                     param = param_dict[name]
                     if hasattr(param, "weight_load"):
@@ -494,6 +502,6 @@ class Qwen3ForCausalLM(MindSporeModelBase):
 
         logits = self.lm_head(hidden_state)
         logits = self.all_gather(logits)
-        logits = ops.cast(logits, dtype.float32) # 缺少mint.cast
+        logits = ops.cast(logits, dtype.float32)  # 缺少mint.cast
         logits = mint.reshape(logits, (-1, logits.shape[-1]))
         return logits
