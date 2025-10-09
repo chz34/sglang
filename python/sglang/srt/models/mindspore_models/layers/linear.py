@@ -3,9 +3,10 @@
 import logging
 from typing import Iterable, Optional, Tuple, Type, Union
 
+import mindspore as ms
 import numpy as np
 import torch
-from mindspore import Parameter, Tensor, dtype, from_numpy, jit, mint, mutable, nn, ops
+from mindspore import Parameter, Tensor, from_numpy, jit, mint, mutable, nn, ops
 
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
@@ -24,11 +25,40 @@ from sglang.srt.models.mindspore_models.utils import _get_tp_group_name, tensor_
 logger = logging.getLogger(__name__)
 
 
-class ColParallelLinear(nn.Cell):
+class LinearBase(nn.Cell):
     def __init__(
-        self, input_size: int, output_size: int, param_dtype: Optional[Type], bias: bool
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        param_dtype: Optional[ms.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
+        self.input_size = input_size
+        self.output_size = output_size
+        self.quant_config = quant_config
+        if param_dtype is None:
+            param_dtype = dtype.float32
+        if quant_config is None:
+            self.quant_method: Optional[QuantizeMethodBase] = UnquantizedLinearMethod()
+        else:
+            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+
+    def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
+        raise NotImplementedError()
+
+
+class ColParallelLinear(LinearBase):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        param_dtype: Optional[ms.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
+        super().__init__(input_size, output_size, bias, param_dtype, quant_config)
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.param_dtype = param_dtype
@@ -37,6 +67,18 @@ class ColParallelLinear(nn.Cell):
         self.enable_bias = bias
 
         self.matmul = ops.MatMul(transpose_b=True)
+
+        assert self.quant_method is not None
+        self.quant_method.create_weights(
+            layer=self,
+            input_size_per_partition=self.input_size,
+            output_partition_sizes=[self.output_size],
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.param_dtype,
+            weight_load=self.weight_load,
+        )
+
         self.weight = Parameter(
             mint.zeros((self.output_size, self.input_size), dtype=self.param_dtype),
             requires_grad=False,
@@ -48,11 +90,13 @@ class ColParallelLinear(nn.Cell):
             setattr(self.bias, "weight_load", self.weight_load)
 
     def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
-        origin_shape = input.shape
-        x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
-        if self.enable_bias:
-            x = mint.add(x, self.bias)
-        return x.view(*origin_shape[:-1], -1)
+        # origin_shape = input.shape
+        # x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
+        # if self.enable_bias:
+        #     x = mint.add(x, self.bias)
+        bias = self.bias if self.enable_bias else None
+        x = self.quant_method.apply(self, input, bias)
+        return x
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
         tp_rank = get_tensor_model_parallel_rank()
@@ -149,7 +193,7 @@ class MLPColParallelLinear(ColParallelLinear):
         self,
         input_size: int,
         output_size: int,
-        param_dtype: Optional[Type],
+        param_dtype: Optional[ms.dtype],
         bias: bool,
         output_sizes: list,
     ) -> None:
@@ -191,16 +235,16 @@ class MLPColParallelLinear(ColParallelLinear):
             param[shard_offset : shard_offset + shard_size, :] = tensor_torch2ms(weight)
 
 
-class RowParallelLinear(nn.Cell):
+class RowParallelLinear(LinearBase):
     def __init__(
         self,
         input_size: int,
         output_size: int,
-        param_dtype: Optional[Type],
-        bias: bool,
+        bias: bool = True,
+        param_dtype: Optional[ms.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(input_size, output_size, bias, param_dtype, quant_config)
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.param_dtype = param_dtype
@@ -213,15 +257,6 @@ class RowParallelLinear(nn.Cell):
         #     mint.zeros((self.output_size, self.input_size), dtype=self.param_dtype),
         #     requires_grad=False,
         # )
-
-        # Dealing with quant
-        self.quant_config = quant_config
-        print("-------------quant_config: ", self.quant_config)
-        self.quant_config = None
-        if quant_config is None:
-            self.quant_method: Optional[QuantizeMethodBase] = UnquantizedLinearMethod()
-        else:
-            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         assert self.quant_method is not None
 
         self.quant_method.create_weights(
@@ -231,7 +266,7 @@ class RowParallelLinear(nn.Cell):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.param_dtype,
-            weight_loader=self.weight_load,
+            weight_load=self.weight_load,
         )
 
         if self.enable_bias:

@@ -25,6 +25,7 @@ def main():
         device="npu",
         model_impl="mindspore",
         attention_backend="ascend",
+        disable_cuda_graph=True,
         tp_size=1,
         dp_size=1,
         log_level="INFO",

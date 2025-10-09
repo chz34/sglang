@@ -3,8 +3,7 @@
 import logging
 import math
 import os
-from functools import lru_cache
-from typing import Iterable, Optional, Tuple, Type, Union
+from typing import Iterable, Optional, Tuple
 
 import mindspore as ms
 import mindspore.common.dtype as mstype

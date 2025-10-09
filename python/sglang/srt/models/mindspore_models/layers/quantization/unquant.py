@@ -32,8 +32,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
-        layer.weight = weight
         set_weight_attrs(weight, extra_weight_attrs)
+        layer.weight = weight
         self.matmul = ops.MatMul(transpose_b=True)
 
     def process_weights_after_loading(self, layer: ms.nn.Cell) -> None:
