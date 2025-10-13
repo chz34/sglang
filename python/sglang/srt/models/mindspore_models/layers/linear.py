@@ -39,11 +39,11 @@ class LinearBase(nn.Cell):
         self.output_size = output_size
         self.quant_config = quant_config
         if param_dtype is None:
-            param_dtype = dtype.float32
+            param_dtype = ms.float32
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
-            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            self.quant_method = quant_config.get_quant_method(self)
 
     def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
         raise NotImplementedError()

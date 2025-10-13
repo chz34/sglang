@@ -50,3 +50,41 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if bias is not None:
             x = mint.add(x, bias)
         return x.view(*origin_shape[:-1], -1)
+
+
+class UnquantizedEmbeddingMethod(QuantizeMethodBase):
+    """Unquantized method for embeddings."""
+
+    def create_weights(
+        self,
+        layer: ms.nn.Cell,
+        input_size_per_partition: int,
+        output_partition_sizes: List[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: ms.dtype,
+        **extra_weight_attrs,
+    ):
+        """Create weights for embedding layer."""
+        weight = ms.Parameter(
+            mint.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        set_weight_attrs(weight, extra_weight_attrs)
+        layer.weight = weight
+
+    def apply(
+        self,
+        layer: ms.nn.Cell,
+        x: ms.Tensor,
+        bias: Optional[ms.Tensor] = None,
+    ) -> ms.Tensor:
+        return mint.linear(x, layer.weight, bias)
+
+    def embedding(self, layer: ms.nn.Cell, input_: ms.Tensor) -> ms.Tensor:
+        return mint.index_select(layer.weight, 0, input_)

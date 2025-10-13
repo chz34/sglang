@@ -73,7 +73,9 @@ class Qwen3MLP(nn.Cell):
 
 
 class Qwen3Attention(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None
+    ) -> None:
         super().__init__()
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -128,6 +130,7 @@ class Qwen3Attention(nn.Cell):
             output_size=self.hidden_size,
             param_dtype=self.param_dtype,
             bias=config.attention_bias,
+            quant_config=quant_config,
         )
         self.rotary_emb = None
         if self.rope_type == "yarn":
@@ -293,7 +296,9 @@ class Qwen3Model(nn.Cell):
         self.hidden_size = config.hidden_size
         self.num_hidden_layers = config.num_hidden_layers
 
-        self.embed_tokens = VocabParallelEmbedding(config=config)
+        self.embed_tokens = VocabParallelEmbedding(
+            config=config, quant_config=quant_config
+        )
 
         self.layers = nn.CellList()
 

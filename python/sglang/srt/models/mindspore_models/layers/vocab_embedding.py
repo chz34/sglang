@@ -3,22 +3,31 @@
 from typing import Any, Iterable, Optional, Tuple
 
 import torch
-
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
 
-from sglang.srt.distributed.utils import divide
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
-from sglang.srt.models.mindspore_models.utils import tensor_torch2ms
-from sglang.srt.models.mindspore_models.utils import _get_tp_group_name
+from sglang.srt.distributed.utils import divide
+from sglang.srt.layers.quantization.base_config import (
+    QuantizationConfig,
+    QuantizeMethodBase,
+    method_has_implemented_embedding,
+)
+from sglang.srt.models.mindspore_models.layers.quantization.unquant import (
+    UnquantizedEmbeddingMethod,
+)
+from sglang.srt.models.mindspore_models.utils import _get_tp_group_name, tensor_torch2ms
+
 
 class VocabParallelEmbedding(nn.Cell):
-    def __init__(self, config: Any) -> None:
+    def __init__(
+        self, config: Any, quant_config: Optional[QuantizationConfig] = None
+    ) -> None:
         super().__init__()
-        
+
         self.num_embeddings = config.vocab_size
         self.embedding_dim = config.hidden_size
         self.tensor_parallel_group_size = get_tensor_model_parallel_world_size()
@@ -34,14 +43,41 @@ class VocabParallelEmbedding(nn.Cell):
         self.num_embeddings_per_partition = (
             self.vocab_end_index - self.vocab_start_index
         )
-        self.weight = Parameter(
-            mint.zeros(
-                (self.num_embeddings_per_partition, self.embedding_dim),
-                dtype=config.param_dtype,
-            ),
-            requires_grad=False,
+
+        quant_method = None
+        if quant_config is not None:
+            quant_method = quant_config.get_quant_method(self)
+        if quant_method is None:
+            quant_method = UnquantizedEmbeddingMethod()
+
+        quant_method_implements_embedding = method_has_implemented_embedding(
+            type(quant_method)
         )
-        setattr(self.weight, "weight_load", self.weight_load)
+        if not quant_method_implements_embedding:
+            raise ValueError(
+                f"Quantization method {type(quant_method)} does not implement embedding."
+            )
+
+        self.quant_method: QuantizeMethodBase = quant_method
+
+        self.quant_method.create_weights(
+            self,
+            self.embedding_dim,
+            [self.num_embeddings_per_partition],
+            self.embedding_dim,
+            self.num_embeddings,
+            params_dtype=config.param_dtype,
+            weight_load=self.weight_load,
+        )
+
+        # self.weight = Parameter(
+        #     mint.zeros(
+        #         (self.num_embeddings_per_partition, self.embedding_dim),
+        #         dtype=config.param_dtype,
+        #     ),
+        #     requires_grad=False,
+        # )
+        # setattr(self.weight, "weight_load", self.weight_load)
 
         tp_group_name = _get_tp_group_name()
         self.all_reduce = ops.AllReduce(group=tp_group_name)
@@ -62,10 +98,13 @@ class VocabParallelEmbedding(nn.Cell):
         else:
             input_mask = None
             truncated_x = x
-        output_parallel = mint.index_select(self.weight, 0, truncated_x)
+        output_parallel = self.quant_method.embedding(self, truncated_x)
+        # output_parallel = mint.index_select(self.weight, 0, truncated_x)
         if self.tensor_parallel_group_size > 1:
             output_parallel = mint.mul(output_parallel, input_mask)
-        output = self.all_reduce(output_parallel)
+            output = self.all_reduce(output_parallel)
+        else:
+            output = output_parallel
         return output
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
