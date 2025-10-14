@@ -118,6 +118,7 @@ class QKVParallelLinear(ColParallelLinear):
         total_num_kv_heads: Optional[int] = None,
         bias: bool = True,
         param_dtype: Optional[Type] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         self.hidden_size = hidden_size
         self.head_dim = head_dim
@@ -144,6 +145,7 @@ class QKVParallelLinear(ColParallelLinear):
             output_size=output_size,
             param_dtype=param_dtype,
             bias=bias,
+            quant_config=quant_config,
         )
 
     def get_shard_offset_and_size(self, shard_id: str):

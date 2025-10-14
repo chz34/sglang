@@ -114,6 +114,7 @@ class Qwen3Attention(nn.Cell):
             total_num_kv_heads=self.num_kv_heads,
             bias=config.attention_bias,
             param_dtype=self.param_dtype,
+            quant_config=quant_config,
         )
         self.q_norm = RMSNorm(
             norm_dim=config.head_dim,
