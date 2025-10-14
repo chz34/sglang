@@ -198,12 +198,14 @@ class MLPColParallelLinear(ColParallelLinear):
         param_dtype: Optional[ms.dtype],
         bias: bool,
         output_sizes: list,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__(
             input_size=input_size,
             output_size=output_size,
             param_dtype=param_dtype,
             bias=bias,
+            quant_config=quant_config,
         )
 
         self.output_sizes = output_sizes

@@ -55,6 +55,7 @@ class Qwen3MLP(nn.Cell):
             param_dtype=self.param_dtype,
             bias=False,
             output_sizes=[self.intermediate_size] * 2,
+            quant_config=quant_config,
         )
         self.down_proj = RowParallelLinear(
             input_size=config.intermediate_size,
