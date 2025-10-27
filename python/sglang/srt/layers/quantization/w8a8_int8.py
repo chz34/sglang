@@ -241,6 +241,12 @@ class W8A8Int8Config(QuantizationConfig):
     ) -> Optional[QuantizeMethodBase]:
         from sglang.srt.layers.linear import LinearBase
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
+        from sglang.srt.models.mindspore_models.layers.linear import (
+            LinearBase as MSLinearBase,
+        )
+        from sglang.srt.models.mindspore_models.layers.quantization.w8a8_int8 import (
+            MSW8A8LinearMethod,
+        )
 
         if _is_npu:
             if isinstance(layer, LinearBase):
@@ -269,6 +275,8 @@ class W8A8Int8Config(QuantizationConfig):
                 )
             elif isinstance(layer, FusedMoE):
                 return NPU_W8A8MoEMethod(self)
+            elif isinstance(layer, MSLinearBase):
+                return MSW8A8LinearMethod(self)
             return None
 
         if should_ignore_layer(
