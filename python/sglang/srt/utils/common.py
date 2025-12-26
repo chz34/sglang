@@ -370,7 +370,11 @@ def get_float_env_var(name: str, default: float = 0.0) -> float:
 
 
 def support_triton(backend: str) -> bool:
-    return backend not in ["torch_native", "intel_amx"]
+    from sgl_mindspore.utils import is_310p
+    if is_310p():
+        return backend not in ["torch_native", "intel_amx", "ascend"]
+    else:
+        return backend not in ["torch_native", "intel_amx"]
 
 
 _ENABLE_TORCH_INFERENCE_MODE = get_bool_env_var(
