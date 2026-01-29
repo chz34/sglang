@@ -185,6 +185,15 @@ def is_cpu() -> bool:
     return os.getenv("SGLANG_USE_CPU_ENGINE", "0") == "1" and is_host_cpu_supported
 
 
+@lru_cache(maxsize=1)
+def is_musa() -> bool:
+    try:
+        import torchada  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch.version, "musa") and torch.version.musa is not None
+
+
 def is_float4_e2m1fn_x2(dtype) -> bool:
     """Check if dtype is float4_e2m1fn_x2 and CUDA is available."""
     target_dtype = getattr(torch, "float4_e2m1fn_x2", None)
@@ -361,7 +370,11 @@ def get_float_env_var(name: str, default: float = 0.0) -> float:
 
 
 def support_triton(backend: str) -> bool:
-    return backend not in ["torch_native", "intel_amx"]
+    from sgl_mindspore.utils import is_310p
+    if is_310p():
+        return backend not in ["torch_native", "intel_amx", "ascend"]
+    else:
+        return backend not in ["torch_native", "intel_amx"]
 
 
 _ENABLE_TORCH_INFERENCE_MODE = get_bool_env_var(
@@ -1043,6 +1056,24 @@ def assert_pkg_version(pkg: str, min_version: str, message: str):
             f"{pkg} with minimum required version {min_version} is not installed. "
             + message
         )
+
+
+def check_pkg_version_at_least(pkg: str, min_version: str) -> bool:
+    """
+    Check if a package is installed and meets the minimum version requirement.
+
+    Args:
+        pkg: Package name (distribution name, e.g., "flashinfer-python")
+        min_version: Minimum version required (e.g., "0.6.2")
+
+    Returns:
+        True if package is installed and version >= min_version, False otherwise
+    """
+    try:
+        installed_version = version(pkg)
+        return pkg_version.parse(installed_version) >= pkg_version.parse(min_version)
+    except PackageNotFoundError:
+        return False
 
 
 def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = None):
@@ -2879,7 +2910,9 @@ def is_fa3_default_architecture(hf_config):
         "Glm4MoeForCausalLM",
         "Glm4vForConditionalGeneration",
         "Glm4vMoeForConditionalGeneration",
+        "GlmOcrForConditionalGeneration",
         "Step3VLForConditionalGeneration",
+        "StepVLForConditionalGeneration",
         "MiMoV2FlashForCausalLM",
     }
     return architectures[0] in default_archs

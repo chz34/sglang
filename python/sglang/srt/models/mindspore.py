@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Iterable, Optional, Tuple
-
 import torch
 
 from sglang.srt.distributed import (
@@ -16,6 +15,7 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.registry import import_model_classes
 from sglang.srt.utils import is_npu
+from sgl_mindspore.utils import is_310p, format_cast
 
 _is_npu = is_npu()
 
@@ -222,7 +222,11 @@ class MindSporeForCausalLM(torch.nn.Module):
                 cache_ms = tensor_torch2ms(cache)
                 if cache_ms.ndim == 3:
                     cache_ms = mint.unsqueeze(cache_ms, 2)
-                cache_list.append(cache_ms)
+
+                if is_310p():
+                    cache_list.append(format_cast(cache_ms, "nz"))
+                else:
+                    cache_list.append(cache_ms)
 
         if self.use_mla:
             if not self.key_cache:
