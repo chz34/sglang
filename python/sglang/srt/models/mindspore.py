@@ -380,6 +380,13 @@ class MindSporeForCausalLM(torch.nn.Module):
     def set_embed(self, embed):
         self.model.set_embed(tensor_torch2ms(embed))
 
+    def pad_input_ids(self, input_ids, mm_inputs):
+        if hasattr(self.model, "pad_input_ids"):
+            return self.model.pad_input_ids(input_ids, mm_inputs)
+        raise AttributeError(
+            f"{type(self.model).__name__} does not implement pad_input_ids"
+        )
+
     def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
         self.model.set_eagle3_layers_to_capture(layer_ids)
 
