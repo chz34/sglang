@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 import torch
 
@@ -336,6 +336,30 @@ class MindSporeForCausalLM(torch.nn.Module):
             return method(config)
         except Exception:
             return None
+
+    # The following methods are used for speculative decoding
+    def get_embed_and_head(self):
+        embed, head = self.model.get_embed_and_head()
+        return tensor_ms2torch(embed), tensor_ms2torch(head)
+
+    def set_embed_and_head(self, embed, head):
+        self.model.set_embed_and_head(tensor_torch2ms(embed), tensor_torch2ms(head))
+
+    def get_embed(self):
+        return tensor_ms2torch(self.model.get_embed())
+
+    def set_embed(self, embed):
+        self.model.set_embed(tensor_torch2ms(embed))
+
+    def pad_input_ids(self, input_ids, mm_inputs):
+        if hasattr(self.model, "pad_input_ids"):
+            return self.model.pad_input_ids(input_ids, mm_inputs)
+        raise AttributeError(
+            f"{type(self.model).__name__} does not implement pad_input_ids"
+        )
+
+    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
+        self.model.set_eagle3_layers_to_capture(layer_ids)
 
 
 EntryClass = [MindSporeForCausalLM]
