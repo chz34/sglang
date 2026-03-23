@@ -174,6 +174,24 @@ class MindSporeForCausalLM(torch.nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # For multimodal configs (e.g. Qwen3_5Config), model parameters live in
+        # text_config; extract it so attribute access works uniformly.
+        text_config = getattr(config, "text_config", config)
+        if text_config is not config:
+            if not getattr(text_config, "architectures", None):
+                text_config.architectures = getattr(config, "architectures", [])
+            # Copy VLM-level attributes (vision config, special token IDs) so the
+            # inner model can access them without needing the outer wrapper config.
+            for _attr in (
+                "vision_config",
+                "image_token_id",
+                "video_token_id",
+                "vision_start_token_id",
+                "vision_end_token_id",
+            ):
+                if hasattr(config, _attr) and not hasattr(text_config, _attr):
+                    setattr(text_config, _attr, getattr(config, _attr))
+            config = text_config
         self.config = config
 
         ms.set_context(graph_kernel_flags="--disable_pass=gather_pre_rms_norm_fusion")
@@ -270,7 +288,13 @@ class MindSporeForCausalLM(torch.nn.Module):
         model_inputs["batch_valid_length"] = ms.Tensor(
             batch_valid_length, dtype=ms.int32
         )
-        model_inputs["position_ids"] = tensor_torch2ms(positions)
+        # Use mrope positions (shape [3, T]) when available for multimodal models
+        if getattr(forward_batch, "mrope_positions", None) is not None:
+            model_inputs["position_ids"] = tensor_torch2ms(
+                forward_batch.mrope_positions
+            )
+        else:
+            model_inputs["position_ids"] = tensor_torch2ms(positions)
         model_inputs["q_seq_lens"] = ms.Tensor(q_seq_lens, dtype=ms.int32)
         model_inputs["attention_mask"] = self.causal_mask.gen_attention_mask(
             is_prefill, model_inputs["position_ids"], q_seq_lens, batch_valid_length
